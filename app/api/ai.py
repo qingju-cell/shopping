@@ -209,21 +209,16 @@ def ai_chat(req: ChatRequest):
         print(f"🔑 搜索关键词：{search_keywords}")
 
     # 4. ⭐ 直接调用阶段四 langchain 版写好的 4 个通道函数（不重复造轮子！）
+    # ========== LangGraph 版（改后）==========
+    from app.AI.langgraph_agent import run_agent
+
     try:
-        if intent == "abuse":
-            answer = _langchain_module.abuse_channel(question)
-        elif intent == "service":
-            answer = _langchain_module.service_channel(question)
-        elif intent == "chat":
-            answer = _langchain_module.chat_channel(_chat_chain, question, history_text)
-        else:  # 默认走商品咨询（RAG 链，携带上下文记忆 + 预计算搜索关键词）
-            answer = _langchain_module.product_channel(_product_chain, question, history_text, search_keywords)
+        result = run_agent(question, history_text)
+        answer = result["answer"]
+        intent = result["intent"]
     except Exception as e:
-        # 兜底：任何通道异常都给用户一个温和的回答（避免前端 500）
-        print(f"⚠️  通道调用失败（intent={intent}）：{e}")
-        import traceback
-        traceback.print_exc()
-        answer = "抱歉，我刚才开小差了~ 你可以再问我一次吗？或者试试问我有什么商品哦！"
+        answer = "抱歉，我刚才开小差了~"
+        intent = "unknown"
 
     print(f"🤖 AI：{answer[:80]}{'...' if len(answer) > 80 else ''}")
 
@@ -231,3 +226,5 @@ def ai_chat(req: ChatRequest):
     return ApiResponse.success(
         data=ChatResponse(answer=answer, intent=intent)
     )
+
+
