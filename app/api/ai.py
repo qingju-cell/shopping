@@ -59,8 +59,7 @@ _llm = None
 _chat_chain = None
 _product_chain = None
 _classify_fn = None
-_langchain_module = None   # 阶段四 langchain 版模块（里面有 4 个通道函数）
-_native_module = None      # 阶段四原生版模块（里面有关键词意图分类）
+_langchain_module = None   # AI 核心模块（合并版 ai_core.py）
 _memory_formatter = None   # 把历史对话格式化成 Prompt 能用的文本
 
 
@@ -92,13 +91,11 @@ def _load_module_by_path(module_name: str, file_name: str):
 
 def _load_ai_modules():
     """
-    加载所有需要的 AI 模块：
-    1. step5_rag_chatbot_langchain.py  → langchain 版的 get_llm / get_vectorstore / chain 构建函数
-    2. step5_rag_chatbot.py           → 原生版的 classify_intent_by_keywords（便宜又快）
+    加载 AI 核心模块（合并版）
+    ai_core.py 包含了所有 AI 代码：嵌入函数、LangChain RAG、LangGraph Agent
     """
-    langchain_module = _load_module_by_path("step5_langchain", "step5_rag_chatbot_langchain.py")
-    native_module    = _load_module_by_path("step5_native",    "step5_rag_chatbot.py")
-    return langchain_module, native_module
+    ai_core = _load_module_by_path("ai_core", "ai_core.py")
+    return ai_core
 
 
 def _init_rag():
@@ -130,18 +127,16 @@ def _init_rag():
         else:
             print(f"  ⚠️  未找到 .env 文件：{env_path}，使用系统环境变量")
 
-        # 2. ⭐ 动态加载两个阶段四模块
-        #    langchain_module：langchain 版的 get_llm / get_vectorstore / 各种 chain 构建函数 / 4 个通道函数
-        #    native_module：   原生版的 classify_intent_by_llm（大模型意图分类）
-        global _langchain_module, _native_module, _memory_formatter
-        _langchain_module, _native_module = _load_ai_modules()
+        # 2. ⭐ 动态加载 AI 核心模块（合并版 ai_core.py）
+        global _langchain_module, _memory_formatter
+        _langchain_module = _load_ai_modules()
         get_llm                     = _langchain_module.get_llm
         get_vectorstore             = _langchain_module.get_vectorstore
         build_chat_chain            = _langchain_module.build_chat_chain
         build_product_chain         = _langchain_module.build_product_chain
         classify_intent_and_expand  = _langchain_module.classify_intent_and_expand
-        _memory_formatter           = _langchain_module.format_memory_for_prompt  # ✅ 记忆格式化
-        print("  ✅ AI 模块加载成功（langchain版 + 原生版，含4个通道函数 + 记忆格式化）")
+        _memory_formatter           = _langchain_module.format_memory_for_prompt
+        print("  ✅ AI 核心模块加载成功（合并版 ai_core.py）")
 
         # 3. 依次初始化
         _llm = get_llm()
@@ -210,7 +205,7 @@ def ai_chat(req: ChatRequest):
 
     # 4. ⭐ 直接调用阶段四 langchain 版写好的 4 个通道函数（不重复造轮子！）
     # ========== LangGraph 版（改后）==========
-    from app.AI.langgraph_agent import run_agent
+    from app.AI.ai_core import run_agent
 
     try:
         result = run_agent(question, history_text)
@@ -226,5 +221,3 @@ def ai_chat(req: ChatRequest):
     return ApiResponse.success(
         data=ChatResponse(answer=answer, intent=intent)
     )
-
-
