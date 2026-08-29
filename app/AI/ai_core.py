@@ -288,6 +288,63 @@ def save_memory(history):
         print(f"⚠️  记忆保存失败：{e}")
 
 
+# ---------- 数据库版：历史消息持久化 ----------
+import uuid
+
+def _get_db_session():
+    """获取数据库会话（懒加载，避免文件被 import 时就连数据库）"""
+    from app.database import SessionLocal
+    return SessionLocal()
+
+
+def save_message_to_db(user_id: int, session_id: str, role: str,
+                       content: str, intent: str = ""):
+    """保存单条消息到 ai_chat_messages 表"""
+    try:
+        from app.models.ai_chat_message import AIChatMessage
+        db = _get_db_session()
+        msg = AIChatMessage(
+            user_id=user_id,
+            session_id=session_id,
+            role=role,
+            content=content,
+            intent=intent,
+        )
+        db.add(msg)
+        db.commit()
+        db.close()
+    except Exception as e:
+        print(f"⚠️  消息入库失败：{e}")
+
+
+def load_history_from_db(user_id: int, session_id: str = None,
+                         limit: int = 20) -> list:
+    """
+    从数据库加载历史消息，返回格式与 load_memory() 一致
+    [{role: "user", content: "xxx", time: "..."}, ...]
+    """
+    try:
+        from app.models.ai_chat_message import AIChatMessage
+        db = _get_db_session()
+        q = db.query(AIChatMessage).filter(AIChatMessage.user_id == user_id)
+        if session_id:
+            q = q.filter(AIChatMessage.session_id == session_id)
+        messages = q.order_by(AIChatMessage.created_at.asc()).limit(limit).all()
+        result = [{"role": m.role, "content": m.content,
+                    "time": m.created_at.isoformat() if m.created_at else ""}
+                  for m in messages]
+        db.close()
+        return result
+    except Exception as e:
+        print(f"⚠️  历史消息加载失败：{e}")
+        return []
+
+
+def generate_session_id() -> str:
+    """生成唯一会话ID"""
+    return uuid.uuid4().hex[:12]
+
+
 def format_memory_for_prompt(history, max_turns=6):
     """
     把历史对话格式化成 Prompt 能直接用的文本
@@ -1016,18 +1073,19 @@ def init_langgraph():
 
 
 
-def run_agent(question: str, history_text: str = "") -> dict:
+def run_agent(question: str, history_text: str = "",
+              user_id: int = None, session_id: str = None) -> dict:
     """
     执行 LangGraph 工作流，返回最终 State
 
-    手写版（ai.py）：
-        intent, keywords = _classify_fn(question, _llm, history_text)
-        if intent == "abuse": ...
-        elif intent == "service": ...
-        ...
+    参数：
+        question:     用户问题
+        history_text: 格式化后的历史对话文本
+        user_id:      用户ID（传入则自动保存消息到数据库）
+        session_id:   会话ID（传入则复用，否则自动生成新会话）
 
-    LangGraph 版：
-        graph.invoke(initial_state) → 一行代码搞定整个流程
+    返回格式：
+        {"answer": "...", "intent": "..."}
     """
     init_langgraph()
 
@@ -1040,6 +1098,13 @@ def run_agent(question: str, history_text: str = "") -> dict:
     }
 
     result = _graph.invoke(initial_state)
+
+    if user_id:
+        sid = session_id or generate_session_id()
+        save_message_to_db(user_id, sid, "user", question, intent=result.get("intent", ""))
+        save_message_to_db(user_id, sid, "ai", result["answer"], intent=result.get("intent", ""))
+        result["session_id"] = sid
+
     return result
 # ============================================================
 # 第五部分：演示 + 聊天模式（方便本地测试）

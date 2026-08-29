@@ -38,6 +38,7 @@ class ChatRequest(BaseModel):
     question: str = Field(..., description="用户当前问的问题", min_length=1)
     history: Optional[List[ChatMessage]] = Field(default=None, description="最近的聊天历史（可选）")
     user_id: Optional[int] = Field(default=None, description="用户ID（可选，暂未使用）")
+    session_id: Optional[str] = Field(default=None, description="会话ID（可选，传入则复用同一个会话）")
 
 
 class ChatResponse(BaseModel):
@@ -203,12 +204,13 @@ def ai_chat(req: ChatRequest):
     if search_keywords:
         print(f"🔑 搜索关键词：{search_keywords}")
 
-    # 4. ⭐ 直接调用阶段四 langchain 版写好的 4 个通道函数（不重复造轮子！）
-    # ========== LangGraph 版（改后）==========
+    # 4. 调用 LangGraph Agent，传入 user_id 自动入库
     from app.AI.ai_core import run_agent
 
     try:
-        result = run_agent(question, history_text)
+        result = run_agent(question, history_text,
+                           user_id=req.user_id,
+                           session_id=getattr(req, "session_id", None))
         answer = result["answer"]
         intent = result["intent"]
     except Exception as e:
@@ -221,3 +223,21 @@ def ai_chat(req: ChatRequest):
     return ApiResponse.success(
         data=ChatResponse(answer=answer, intent=intent)
     )
+
+
+# ---------- 获取历史消息接口：GET /api/ai/history ----------
+@router.get("/history", summary="获取 AI 聊天历史")
+def get_history(user_id: int, session_id: str = None,
+                limit: int = 20, offset: int = 0):
+    """
+    GET /api/ai/history?user_id=1&session_id=abc123&limit=20&offset=0
+    返回该用户的历史消息列表（分页）
+    """
+    from app.AI.ai_core import load_history_from_db
+    messages = load_history_from_db(user_id, session_id, limit=limit)
+    return ApiResponse.success(data={
+        "user_id": user_id,
+        "session_id": session_id,
+        "total": len(messages),
+        "messages": messages,
+    })
