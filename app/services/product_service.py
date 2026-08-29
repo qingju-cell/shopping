@@ -76,23 +76,16 @@ class ProductService:
         # 分页查询：按 ID 倒序（新的在前），跳过前面的页，取当前页的数据
         products = query.order_by(Product.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
 
+        # ==============================================
+        # 【第三步】统一用 to_dict() 处理，然后同时用于"返回"和"写缓存"
+        # ==============================================
+
+        # 把 ORM 对象数组转成字典数组
+        list_as_dict = [p.to_dict() for p in products]
+
+        # 统一的结果对象：返回给前端 和 写入缓存 都用它，保证一致
         result = {
-            "list": products,  # 当前页的商品列表
-            "total": total,  # 符合条件的商品总数
-            "page": page,  # 当前页码
-            "page_size": page_size  # 每页数量
-        }
-
-        # ==============================================
-        # 【第三步】把查询结果写入 Redis，下次就能命中了
-        # ==============================================
-
-        # 3.1 准备可序列化的数据
-        # result["list"] 里装的是 ORM 对象，json.dumps 不认识
-        # 所以每个 product 调用 .to_dict() 转成普通字典
-
-        result_for_cache = {
-            "list": [p.to_dict() for p in products],
+            "list": list_as_dict,
             "total": total,
             "page": page,
             "page_size": page_size
@@ -104,7 +97,7 @@ class ProductService:
                 redis_client.setex(
                     cache_key,
                     settings.REDIS_CACHE_EXPIRE,
-                    json.dumps(result_for_cache)
+                    json.dumps(result)
                 )
             except redis.ConnectionError:
                 pass
@@ -131,8 +124,7 @@ class ProductService:
         db.commit()
         db.refresh(db_product)
 
-        # ========== 新增：清除商品列表缓存 ==========
-        _clear_product_cache()
+
 
         return db_product
 
