@@ -1009,15 +1009,16 @@ def build_graph():
     # 3. 设置入口节点（图从哪个节点开始执行）
     workflow.set_entry_point("classify_intent_node")
     # 4. 添加条件边：从 classify_intent 出发，根据意图路由到不同节点
-    workflow.add_edges("classify_intent_node",   # 从哪个节点出发
-                       route_by_intent,          # 路由函数：返回下一个节点名
-                       {
-                           "product": "product_node",
-                           "chat": "chat_node",
-                           "service": "service_node",
-                           "abuse": "abuse_node",
-                       }
-                       )
+    workflow.add_conditional_edges(
+        "classify_intent_node",   # 从哪个节点出发
+        route_by_intent,          # 路由函数：返回下一个节点名
+        {
+            "product": "product_node",
+            "chat": "chat_node",
+            "service": "service_node",
+            "abuse": "abuse_node",
+        }
+    )
     # 5. 所有通道节点执行完后，结束
     workflow.add_edge("product_node", END)
     workflow.add_edge("chat_node", END)

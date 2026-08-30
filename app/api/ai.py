@@ -214,6 +214,8 @@ def ai_chat(req: ChatRequest):
         answer = result["answer"]
         intent = result["intent"]
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         answer = "抱歉，我刚才开小差了~"
         intent = "unknown"
 
