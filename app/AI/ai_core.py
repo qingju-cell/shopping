@@ -935,48 +935,28 @@ class AgentState(TypedDict):
 
 # ---------- 节点 1：意图分类 ----------
 def classify_intent_node(state:AgentState)->dict:
-    """
-        对应手写版 ai.py 里的：
-            intent, search_keywords = _classify_fn(question, _llm, history_text)
-
-        区别：
-            手写版：返回两个值，调用方手动拆包
-            LangGraph版：返回 dict，框架自动合并到 State
-    """
-    intent, search_keywords = classify_intent_and_expand(state["question"], state["history_text"])
-    print (f"意图分类结果：{intent}, 搜索关键词：{search_keywords}")
+    intent, search_keywords = classify_intent_and_expand(
+        state["question"], _llm, state["history_text"]
+    )
+    print(f"意图分类结果：{intent}, 搜索关键词：{search_keywords}")
     return {"intent": intent, "search_keyword": search_keywords}
 
 # ---------- 节点 2：商品推荐（RAG）----------
 def product_node(state:AgentState)->dict:
-    """
-       对应手写版 ai.py 里的：
-           answer = _langchain_module.product_channel(
-               _product_chain, question, history_text, search_keywords
-           )
-
-       区别：
-           手写版：需要手动传 4 个参数
-           LangGraph版：从 State 里取，不需要考虑参数顺序
-       """
-    answer=product_channel(
+    answer = product_channel(
+        _product_chain,
         state["question"],
         state["history_text"],
         state["search_keyword"],
     )
-    print (f"商品推荐结果：{answer}")
+    print(f"商品推荐结果：{answer}")
     return {"answer": answer}
 
 
 # ---------- 节点 3：闲聊 ----------
-
 def chat_node(state: AgentState) -> dict:
-    """
-    对应手写版：chat_channel(_chat_chain, question, history_text)
-    """
-
-    answer=chat_channel(state["question"], state["history_text"])
-    print (f"闲聊结果：{answer}")
+    answer = chat_channel(_chat_chain, state["question"], state["history_text"])
+    print(f"闲聊结果：{answer}")
     return {"answer": answer}
 
 
