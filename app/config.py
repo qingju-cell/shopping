@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str = ''
     REDIS_DB: int = 0
     REDIS_CACHE_EXPIRE: int = 3600
+    REDIS_NULL_CACHE_EXPIRE: int = 60
 
     # ---------- 计算属性：拼接数据库连接 URL ----------
     # 格式：mysql+pymysql://用户名:密码@主机:端口/数据库名?charset=utf8mb4

@@ -8,6 +8,8 @@
 #   5. 删除分类
 # ============================================================
 import json
+import time
+import random
 
 import redis
 from sqlalchemy.orm import Session
@@ -27,33 +29,68 @@ class CategoryService:
         """
         获取所有分类，按 sort 字段升序排列
         数字越小的分类越靠前
+
+        缓存穿透防护：
+        1. 缓存空对象：空列表也写缓存，60秒过期
+        缓存击穿防护：
+        2. 互斥锁自旋：分类列表是典型热点，缓存过期时只有一个请求查DB
         """
         cache_key = f"categories:list"
+        lock_key = f"lock:{cache_key}"
+        lock_expire = 3
 
-        # ========== 尝试读缓存，Redis 挂了就跳过 ==========
+        # ========== 先查 Redis 缓存 + 互斥锁，Redis 挂了就跳过 ==========
         if redis_available():
             try:
                 cache = redis_client.get(cache_key)
-                if cache:
-                    return json.loads(cache)
+                if cache is not None:
+                    cached_data = json.loads(cache)
+                    return cached_data
+
+                # 【缓存没命中 → 加互斥锁，防止击穿】
+                for _ in range(5):
+                    locked = redis_client.set(lock_key, 1, nx=True, ex=lock_expire)
+                    if locked:
+                        try:
+                            # 拿到锁 → 查DB + 写缓存
+                            result = db.query(Category).order_by(Category.sort.asc()).all()
+                            list_as_dict = [category.to_dict() for category in result]
+                            # 写缓存：空列表也写，防穿透
+                            expire = (
+                                settings.REDIS_NULL_CACHE_EXPIRE
+                                if len(list_as_dict) == 0
+                                else settings.REDIS_CACHE_EXPIRE
+                            )
+                            redis_client.setex(cache_key, expire, json.dumps(list_as_dict))
+                            return list_as_dict
+                        finally:
+                            redis_client.delete(lock_key)
+                    else:
+                        # 没拿到锁，等50ms后重试查缓存
+                        time.sleep(0.05)
+                        cache = redis_client.get(cache_key)
+                        if cache is not None:
+                            return json.loads(cache)
             except redis.ConnectionError:
-                pass
+                pass  # Redis 挂了，降级走兜底 DB 查询
 
-        # ========== 查数据库（永远能执行）==========
+        # ========== 兜底：Redis 不可用 / 5次重试都没等到，直接查DB ==========
         result = db.query(Category).order_by(Category.sort.asc()).all()
+        list_as_dict = [category.to_dict() for category in result]
 
-        # ========== 尝试写缓存，Redis 挂了就跳过 ==========
+        # 兜底查询也顺便写缓存（Redis 挂了就跳过）
         if redis_available():
             try:
-                redis_client.setex(
-                    cache_key,
-                    settings.REDIS_CACHE_EXPIRE,
-                    json.dumps([category.to_dict() for category in result])
+                expire = (
+                    settings.REDIS_NULL_CACHE_EXPIRE
+                    if len(list_as_dict) == 0
+                    else settings.REDIS_CACHE_EXPIRE
                 )
+                redis_client.setex(cache_key, expire, json.dumps(list_as_dict))
             except redis.ConnectionError:
                 pass
 
-        return [category.to_dict() for category in result]
+        return list_as_dict
 
     # ---------- 新增分类 ----------
     @staticmethod
@@ -80,9 +117,97 @@ class CategoryService:
     def get_category_by_id(db: Session, category_id: int) -> Category | None:
         """
         根据分类 ID 获取分类信息
-        返回 None 表示不存在
+        返回 None 表示不存在（保持返回 ORM 对象，供 update/delete 内部使用）
+
+        缓存穿透防护：
+        1. 参数校验：ID 必须大于 0，不合法直接拦截
+        2. 缓存空对象：查不到时写入 "__NULL__"，60 秒内同样的请求不会再打到 DB
+        缓存击穿防护：
+        3. 互斥锁自旋：热点分类缓存过期时，只有一个请求查DB
         """
-        return db.query(Category).filter(Category.id == category_id).first()
+        # ========== 第一道防线：参数校验 ==========
+        if category_id is None or category_id <= 0:
+            return None
+
+        cache_key = f"categories:detail:{category_id}"
+        lock_key = f"lock:{cache_key}"
+        lock_expire = 3
+
+        # ========== 先查 Redis 缓存 + 互斥锁，Redis 挂了就跳过 ==========
+        if redis_available():
+            try:
+                cache = redis_client.get(cache_key)
+                if cache is not None:
+                    # ========== 命中空对象缓存，直接返回 None ==========
+                    if cache == "__NULL__":
+                        return None
+                    cached_dict = json.loads(cache)
+                    category = Category()
+                    for k, v in cached_dict.items():
+                        setattr(category, k, v)
+                    return category
+
+                # 【缓存没命中 → 加互斥锁，防止击穿】
+                for _ in range(5):
+                    locked = redis_client.set(lock_key, 1, nx=True, ex=lock_expire)
+                    if locked:
+                        try:
+                            # 拿到锁 → 查DB + 写缓存
+                            category = db.query(Category).filter(
+                                Category.id == category_id
+                            ).first()
+                            if category is None:
+                                redis_client.setex(
+                                    cache_key,
+                                    settings.REDIS_NULL_CACHE_EXPIRE,
+                                    "__NULL__",
+                                )
+                            else:
+                                redis_client.setex(
+                                    cache_key,
+                                    settings.REDIS_CACHE_EXPIRE + random.randint(-300, 300),
+                                    json.dumps(category.to_dict()),
+                                )
+                            return category
+                        finally:
+                            redis_client.delete(lock_key)
+                    else:
+                        # 没拿到锁，等50ms后重试查缓存
+                        time.sleep(0.05)
+                        cache = redis_client.get(cache_key)
+                        if cache is not None:
+                            if cache == "__NULL__":
+                                return None
+                            cached_dict = json.loads(cache)
+                            category = Category()
+                            for k, v in cached_dict.items():
+                                setattr(category, k, v)
+                            return category
+            except redis.ConnectionError:
+                pass  # Redis 挂了，降级走兜底 DB 查询
+
+        # ========== 兜底：Redis 不可用 / 5次重试都没等到，直接查DB ==========
+        category = db.query(Category).filter(Category.id == category_id).first()
+
+        # 兜底查询也顺便写缓存（Redis 挂了就跳过）
+        if redis_available():
+            try:
+                if category is None:
+                    redis_client.setex(
+                        cache_key,
+                        settings.REDIS_NULL_CACHE_EXPIRE,
+                        "__NULL__",
+                    )
+                else:
+                    redis_client.setex(
+                        cache_key,
+                        settings.REDIS_CACHE_EXPIRE + random.randint(-300, 300),
+                        json.dumps(category.to_dict()),
+                    )
+            except redis.ConnectionError:
+                pass
+
+        return category
 
     # ---------- 修改分类 ----------
     @staticmethod
@@ -110,8 +235,9 @@ class CategoryService:
         db.commit()
         db.refresh(db_category)
 
-        # ========== 新增：清除分类列表缓存 ==========
+        # ========== 新增：清除分类列表缓存 + 分类详情缓存 ==========
         _delete_category_cache()
+        _delete_category_detail_cache(category_id)
         return db_category
 
     # ---------- 删除分类 ----------
@@ -126,12 +252,12 @@ class CategoryService:
         db.delete(db_category)
         db.commit()
 
-        # ========== 新增：清除分类列表缓存 ==========
+        # ========== 新增：清除分类列表缓存 + 分类详情缓存 ==========
         _delete_category_cache()
+        _delete_category_detail_cache(category_id)
 
 
 
-        # 4. 从 Redis 中删除缓存
 def _delete_category_cache():
     """
     删除所有分类缓存
@@ -140,5 +266,17 @@ def _delete_category_cache():
     if redis_available():
         try:
             redis_client.delete("categories:list")
+        except redis.ConnectionError:
+            pass
+
+
+def _delete_category_detail_cache(category_id: int):
+    """
+    删除指定分类的详情缓存
+    Redis 挂了就跳过，不影响业务
+    """
+    if redis_available():
+        try:
+            redis_client.delete(f"categories:detail:{category_id}")
         except redis.ConnectionError:
             pass

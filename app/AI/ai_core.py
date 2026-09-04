@@ -55,7 +55,7 @@ class BigModelEmbeddingFunction:
         :param model: 嵌入模型名称，默认 "embedding-3"
         :param dimensions: 输出向量维度，默认 512
         """
-        self.api_key = "2e6028fcb89443bfa0218360e6e4114f.4E28yfEMMc42lMIY"
+        self.api_key = api_key or os.getenv("BIGMODEL_API_KEY")
         if not self.api_key:
             raise ValueError("请在环境变量或代码中设置 BIGMODEL_API_KEY")
         self.model = model
