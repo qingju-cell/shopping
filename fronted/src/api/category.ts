@@ -1,5 +1,5 @@
 import request from '@/utils/request'
-import { Category, CategoryCreate, CategoryUpdate } from '@/types'
+import type { Category, CategoryCreate, CategoryUpdate } from '@/types'
 
 export function getCategoryListApi() {
   return request.get<Category[]>('/category/')

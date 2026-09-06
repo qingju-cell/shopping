@@ -1,0 +1,10 @@
+.git
+.idea
+.vscode
+.env
+__pycache__
+*.py[cod]
+*.log
+fronted/node_modules
+fronted/dist
+app/AI/chroma_db

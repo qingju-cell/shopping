@@ -72,7 +72,7 @@
               @click 点击整个商品项跳转到对应商品详情页
             -->
             <div
-              v-for="item in (order.items || order.order_items)?.slice(0, 3)"
+              v-for="item in getOrderItems(order).slice(0, 3)"
               :key="item.id"
               class="goods-item"
               @click="goToProduct(item.product_id)"
@@ -110,8 +110,8 @@
               如果商品超过 3 件，显示"等 N 件商品"的提示
               这样订单卡片不会太长
             -->
-            <div v-if="(order.items || order.order_items) && (order.items || order.order_items).length > 3" class="more-goods">
-              等 {{ (order.items || order.order_items).length }} 件商品
+            <div v-if="getOrderItems(order).length > 3" class="more-goods">
+              等 {{ getOrderItems(order).length }} 件商品
             </div>
           </div>
 
@@ -241,7 +241,7 @@
             双写兼容：items 字段（后端计算属性）或 order_items（后端原始字段）
           -->
           <div
-            v-for="item in (currentOrder.items || (currentOrder as any).order_items)"
+            v-for="item in getOrderItems(currentOrder)"
             :key="item.id"
             class="detail-goods-item"
           >
@@ -309,7 +309,7 @@
   import { ElMessage } from 'element-plus'
 
   // Order 类型定义（TypeScript 类型检查用，防止变量写错）
-  import type { Order } from '@/types'
+  import type { Order, OrderItem } from '@/types'
 
 
   // ===== 2. 获取全局对象 =====
@@ -412,10 +412,12 @@
    * @param order 订单对象
    * @returns 商品总件数
    */
+  function getOrderItems(order: Order | null): OrderItem[] {
+    return order?.items ?? order?.order_items ?? []
+  }
+
   function getTotalQuantity(order: Order): number {
-    // 兼容两个字段名
-    const items = (order as any).items || (order as any).order_items
-    if (!items) return 0
+    const items = getOrderItems(order)
     // reduce：把数组里每个 item.quantity 累加起来
     // 例如 [{quantity: 2}, {quantity: 3}] → 2 + 3 = 5
     return items.reduce((sum: number, item: any) => sum + item.quantity, 0)

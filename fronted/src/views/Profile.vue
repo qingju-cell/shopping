@@ -28,7 +28,7 @@
           </div>
           <div class="detail-item">
             <span class="detail-label">注册时间</span>
-            <span class="detail-value">{{ formatDate(userStore.userInfo?.create_at) }}</span>
+            <span class="detail-value">{{ formatDate(userStore.userInfo?.created_at) }}</span>
           </div>
         </div>
       </div>

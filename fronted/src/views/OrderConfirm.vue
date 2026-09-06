@@ -112,6 +112,9 @@ import { PLACEHOLDER_IMG } from '@/constants/placeholder'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage } from 'element-plus'
 import type { OrderItemCreate, Product } from '@/types'
+
+type OrderPreviewProduct = Pick<Product, 'id' | 'name' | 'price' | 'image_url'>
+
 const route = useRoute()
 const router = useRouter()
 const cartStore = useCartStore()
@@ -141,7 +144,7 @@ const addressRules: FormRules = {
 }
 
 // 订单商品列表（带商品信息）
-const orderItems = ref<(OrderItemCreate & { product?: Product })[]>([])
+const orderItems = ref<(OrderItemCreate & { product: OrderPreviewProduct })[]>([])
 
 const totalQuantity = computed(() => {
   return orderItems.value.reduce((sum, item) => sum + item.quantity, 0)
@@ -165,7 +168,12 @@ async function initOrderItems() {
       orderItems.value = cartItems.map(item => ({
         product_id: item.product_id,
         quantity: item.quantity,
-        product: item.product
+        product: {
+          id: item.product_id,
+          name: item.product_name,
+          price: item.product_price,
+          image_url: item.product_image
+        }
       }))
        } else if (product_id) {
       // 立即购买

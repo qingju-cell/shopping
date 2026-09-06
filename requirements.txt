@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+PyMySQL
+redis
+pydantic-settings
+python-dotenv
+requests
+bcrypt
+numpy
+chromadb
+langchain-core
+langchain-chroma
+langchain-deepseek
+langchain-openai
+langgraph
