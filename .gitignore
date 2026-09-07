@@ -13,3 +13,5 @@ build/
 *.egg-info/
 chroma_db/
 *.bin
+# 本地自动化测试生成的报告
+reports/*.xml

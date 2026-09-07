@@ -1,4 +1,6 @@
-﻿# Shopping 购物系统
+# Shopping 购物系统
+
+[![Docker API tests](https://github.com/qingju-cell/shopping/actions/workflows/docker-api-tests.yml/badge.svg?branch=main)](https://github.com/qingju-cell/shopping/actions/workflows/docker-api-tests.yml)
 
 一个基于 **FastAPI + Vue 3 + Redis** 的全栈电商系统，包含完整的商品、分类、购物车、订单、用户模块，并集成了基于 **RAG（检索增强生成）的 AI 智能客服**。
 
@@ -139,6 +141,47 @@ shopping/
 
 ---
 
+## Docker 部署架构
+
+```mermaid
+flowchart LR
+    Browser[浏览器] -->|HTTP :8080| Nginx[Nginx / web 容器]
+    Nginx -->|返回 Vue 打包后的 HTML、JS、CSS| Browser
+    Nginx -->|/api/ 反向代理| Backend[FastAPI / backend 容器]
+    Backend -->|SQL :3306| MySQL[(MySQL / db 容器)]
+    Backend -->|缓存与分布式锁 :6379| Redis[(Redis / redis 容器)]
+    Backend -->|持久化向量数据| Chroma[(Chroma 数据卷)]
+```
+
+- 浏览器只访问 `http://localhost:8080`；Nginx 负责发送 Vue 打包后的静态文件。
+- 页面请求 `/api/...` 时，Nginx 在 Docker 内转发给服务名为 `backend` 的 FastAPI 容器。
+- FastAPI 在 Docker 内通过服务名 `db` 访问 MySQL，通过 `redis` 访问 Redis；这些名字由 Docker Compose 的内部网络提供。
+- MySQL、Redis 和 Chroma 使用 Docker volume 保存数据。因此即使重新创建后端或前端容器，商品数据也不会因普通的 `docker compose down` 而消失。
+
+## Docker 快速启动
+
+```powershell
+# 首次启动或代码、依赖发生变化后：构建并在后台启动四个容器
+docker compose up -d --build
+
+# 查看四个服务是否都正常运行
+docker compose ps
+
+# 运行只读 API 自动化测试
+docker compose exec -T backend pytest -q
+
+# 停止容器，但保留数据库和缓存数据
+docker compose down
+```
+
+访问地址：
+
+- 前端：`http://localhost:8080`
+- 后端 API 文档：`http://localhost:8000/docs`
+
+部署细节见 [Docker 部署说明](docs/docker-deployment-guide.md)，测试细节见 [自动化测试说明](docs/testing-guide.md)。
+
+---
 ## 快速开始
 
 ### 环境要求
