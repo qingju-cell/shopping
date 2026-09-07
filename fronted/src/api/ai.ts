@@ -5,41 +5,51 @@
 
 import request from '@/utils/request'
 
-// ---------- 类型定义 ----------
-
-/** 单条聊天消息 */
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   timestamp?: number
-  /** 发送中状态（前端用） */
   loading?: boolean
-  /** 识别到的意图（AI消息带） */
   intent?: string
 }
 
-/** AI 聊天请求 */
 export interface AIChatRequest {
   question: string
   history?: ChatMessage[]
   user_id?: number
+  /** 首次不传；后续请求传回后端返回的值，表示继续同一段对话。 */
+  session_id?: string
 }
 
-/** AI 聊天响应 */
 export interface AIChatResponse {
   answer: string
   intent: 'product' | 'chat' | 'service' | 'abuse' | 'unknown'
+  /** 登录用户首次聊天后由后端返回，用于后续续聊。 */
+  session_id?: string
 }
 
-// ---------- API 方法 ----------
+interface ChatHistoryMessage {
+  role: 'user' | 'ai'
+  content: string
+  time?: string
+}
 
-/**
- * 发送消息给 AI 客服
- * @param data 请求体：包含问题和聊天历史
- * @returns AI 的回答 + 意图
- */
+export interface AIChatHistoryResponse {
+  user_id: number
+  session_id: string
+  total: number
+  messages: ChatHistoryMessage[]
+}
+
 export function aiChatApi(data: AIChatRequest) {
   return request.post<AIChatResponse>('/ai/chat', data, {
-    timeout: 100000  // AI 聊天首次请求需要初始化，可能较慢，设 60 秒
+    timeout: 100000
+  })
+}
+
+/** 读取某一段已持久化的聊天记录；仅在登录用户且已有 session_id 时调用。 */
+export function aiChatHistoryApi(userId: number, sessionId: string) {
+  return request.get<AIChatHistoryResponse>('/ai/history', {
+    params: { user_id: userId, session_id: sessionId, limit: 20 }
   })
 }

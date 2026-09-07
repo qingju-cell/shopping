@@ -19,6 +19,8 @@ from app.api._init_ import api_router
 from app.common.exception_handler import global_exception_handler
 from app.config import settings
 from app.database import Base, engine
+# Register before create_all so the new table is created at startup.
+from app.models.ai_chat_session import AIChatSession  # noqa: F401
 from app.metrics import record_http_request, request_start_time
 
 # ---------- 1. 自动建表 ----------

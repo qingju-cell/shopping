@@ -13,6 +13,7 @@
 import os
 import sys
 import json
+import re
 from datetime import datetime
 from typing import TypedDict
 
@@ -346,6 +347,98 @@ def generate_session_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+# ---------- 会话级结构化购物记忆 ----------
+# 完整消息存在 ai_chat_messages；这里只保存小而稳定的购物条件，避免 Prompt 无限增长。
+_MEMORY_STOP = {"商品", "产品", "推荐", "购买", "想买", "有没有", "便宜", "更便宜", "价格", "多少钱", "有货", "库存"}
+_PREFERENCES = {"轻薄", "游戏", "学生", "办公", "编程", "拍照", "续航", "大屏", "小屏", "高端", "性价比", "低价", "静音", "便携", "送礼"}
+
+def _memory_words(text: str) -> list[str]:
+    words = re.split(r"[\s,，、/|]+", text or "")
+    result = []
+    for word in words:
+        word = word.strip()[:20]
+        if word and word not in _MEMORY_STOP and word not in result:
+            result.append(word)
+    return result
+
+def _budget(text: str) -> tuple[int | None, int | None]:
+    text = text.replace(",", "")
+    match = re.search(r"(\d{2,6})\s*(?:元)?\s*(?:到|至|[-~～])\s*(\d{2,6})\s*(?:元)?", text)
+    if match:
+        return tuple(sorted((int(match.group(1)), int(match.group(2)))))
+    match = re.search(r"(?:预算|不超过|低于|小于|最多|控制在)\s*(\d{2,6})\s*(?:元)?|(?:\d{2,6})\s*(?:元)?\s*(?:以内|以下)", text)
+    if match:
+        return None, int(match.group(1) or re.search(r"\d{2,6}", match.group(0)).group())
+    match = re.search(r"(?:不少于|至少|起步)\s*(\d{2,6})\s*(?:元)?", text)
+    return (int(match.group(1)), None) if match else (None, None)
+
+def update_structured_memory(
+    memory: dict | None, question: str, intent: str, search_keywords: str, topic_mode: str = "continue"
+) -> dict:
+    """复用已有意图/关键词结果更新记忆，不额外调用模型。"""
+    updated = dict(memory or {})
+    updated["last_intent"] = intent
+    updated["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    if intent != "product": return updated
+    if topic_mode == "new":
+        # 用户明确换商品时，旧商品的预算、偏好不能泄漏到新商品需求中。
+        for key in ("topic_keywords", "preferences", "budget_min", "budget_max"):
+            updated.pop(key, None)
+    old_topics = [x for x in updated.get("topic_keywords", []) if isinstance(x, str)]
+    words = _memory_words(search_keywords)
+    updated["topic_keywords"] = (old_topics + [x for x in words if x not in old_topics])[-8:]
+    old_preferences = [x for x in updated.get("preferences", []) if isinstance(x, str)]
+    found = [x for x in words + _memory_words(question) if x in _PREFERENCES]
+    updated["preferences"] = (old_preferences + [x for x in found if x not in old_preferences])[-8:]
+    low, high = _budget(question)
+    if low is not None: updated["budget_min"] = low
+    if high is not None: updated["budget_max"] = high
+    return updated
+
+def format_structured_memory_for_prompt(memory: dict | None) -> str:
+    if not memory or not memory.get("topic_keywords"): return ""
+    lines = ["【长期购物记忆（仅在与当前问题相关时参考）】", f"关注商品：{'、'.join(memory['topic_keywords'])}"]
+    low, high = memory.get("budget_min"), memory.get("budget_max")
+    if low is not None and high is not None: lines.append(f"预算：{low}-{high} 元")
+    elif high is not None: lines.append(f"预算上限：{high} 元")
+    elif low is not None: lines.append(f"预算下限：{low} 元")
+    if memory.get("preferences"): lines.append(f"偏好：{'、'.join(memory['preferences'])}")
+    return "\n".join(lines)
+
+def load_structured_memory(user_id: int, session_id: str) -> dict:
+    db = _get_db_session()
+    try:
+        from app.models.ai_chat_session import AIChatSession
+        row = db.query(AIChatSession).filter(AIChatSession.user_id == user_id, AIChatSession.session_id == session_id).first()
+        value = json.loads(row.memory_json or "{}") if row else {}
+        return value if isinstance(value, dict) else {}
+    except Exception as error:
+        print(f"⚠️  会话记忆读取失败：{error}"); return {}
+    finally: db.close()
+
+def save_structured_memory(user_id: int, session_id: str, memory: dict) -> None:
+    db = _get_db_session()
+    try:
+        from app.models.ai_chat_session import AIChatSession
+        row = db.query(AIChatSession).filter(AIChatSession.user_id == user_id, AIChatSession.session_id == session_id).first()
+        if not row:
+            row = AIChatSession(user_id=user_id, session_id=session_id); db.add(row)
+        row.memory_json = json.dumps(memory, ensure_ascii=False); db.commit()
+    except Exception as error:
+        db.rollback(); print(f"⚠️  会话记忆保存失败：{error}")
+    finally: db.close()
+
+def merge_memory_into_context(history_text: str, memory: dict) -> str:
+    structured = format_structured_memory_for_prompt(memory)
+    return f"{structured}\n\n【最近对话】\n{history_text or '（无最近对话）'}" if structured else history_text
+
+def remove_structured_memory_from_context(context_text: str) -> str:
+    """新商品话题已确认后，只把原始最近对话交给推荐节点。"""
+    marker = "\n\n【最近对话】\n"
+    prefix, separator, recent_history = context_text.partition(marker)
+    if separator and prefix.startswith("【长期购物记忆（仅在与当前问题相关时参考）】"):
+        return recent_history
+    return context_text
 def format_memory_for_prompt(history, max_turns=6):
     """
     把历史对话格式化成 Prompt 能直接用的文本
@@ -460,7 +553,12 @@ def get_intent_and_expand_prompt_template():
 - service：售后问题（订单、物流、退换货等）
 - abuse：恶意内容（辱骂等）
 
-【任务2：搜索关键词提取】（仅当意图为 product 时需要）
+【任务2：话题关系判断】（仅当意图为 product 时需要）
+- continue：用户在延续刚才同一种商品或同一组条件，例如“再便宜一点”“要轻薄的”
+- new：用户明确开始另一种商品需求，例如前面聊笔记本，现在问“想买拍照手机”
+- chat、service、abuse 必须填写 none
+
+【任务3：搜索关键词提取】（仅当意图为 product 时需要）
 从对话上下文和当前问题中，提取用于商品搜索的核心关键词。
 规则：
 - 如果用户在追问之前的话题（如"有便宜的吗"），结合上下文补全关键词
@@ -475,13 +573,14 @@ def get_intent_and_expand_prompt_template():
 
 【输出格式】
 严格按以下格式输出，一行搞定：
-<意图>|<搜索关键词>
+<意图>|<话题关系>|<搜索关键词>
 
 示例：
-product|手机 便宜 性价比
-chat|
-service|
-abuse|
+product|continue|笔记本 低价
+product|new|手机 拍照
+chat|none|
+service|none|
+abuse|none|
 
 现在请输出："""
     return ChatPromptTemplate.from_template(template)
@@ -609,8 +708,9 @@ def classify_intent_by_llm(question, llm,history_text):
 def classify_intent_and_expand(question, llm, history_text):
     """
     合并版：一次 LLM 调用同时完成意图分类 + 搜索关键词提取
-    返回: (intent, search_keywords)
+    返回: (intent, topic_mode, search_keywords)
       - intent: "product" | "chat" | "service" | "abuse"
+      - topic_mode: product 时为 "continue"（延续）或 "new"（新话题）
       - search_keywords: 搜索关键词字符串（仅 product 意图有值）
     """
     prompt = get_intent_and_expand_prompt_template()
@@ -618,22 +718,35 @@ def classify_intent_and_expand(question, llm, history_text):
     record_llm_token_usage(response, "intent_classification")
     raw = response.content.strip()
     
-    # 解析 "product|手机 便宜 性价比" 格式
-    if "|" in raw:
-        parts = raw.split("|", 1)
+    # 新格式："product|continue|笔记本 低价"。
+    # 同时兼容旧模型可能返回的 "product|笔记本 低价"。
+    parts = raw.split("|", 2)
+    if len(parts) == 3:
         intent = parts[0].strip().lower()
-        keywords = parts[1].strip() if len(parts) > 1 else ""
+        topic_mode = parts[1].strip().lower()
+        keywords = parts[2].strip()
+    elif len(parts) == 2:
+        intent = parts[0].strip().lower()
+        topic_mode = "continue" if intent == "product" else "none"
+        keywords = parts[1].strip()
     else:
-        # 兼容旧格式：只有意图没有关键词
+        # 兼容更旧格式：只有意图没有关键词。
         intent = raw.lower()
+        topic_mode = "continue" if intent == "product" else "none"
         keywords = ""
     
     # 确保意图是有效值
     valid_intents = {"product", "chat", "service", "abuse"}
     if intent not in valid_intents:
         intent = "chat"
+
+    if intent != "product":
+        topic_mode = "none"
+    elif topic_mode not in {"continue", "new"}:
+        # 模型未按格式回答时，选择保守的“延续”，避免意外丢失用户条件。
+        topic_mode = "continue"
     
-    return intent, keywords
+    return intent, topic_mode, keywords
 
 
 # def classify_intent_by_keywords(question):
@@ -935,17 +1048,22 @@ class AgentState(TypedDict):
     question:str      # 用户问题
     history_text:str  # 历史对话文本
     intent:str        # 意图分类
+    topic_mode:str    # product 时是 continue（延续）或 new（新话题）
     search_keyword:str # 搜索关键词
     answer:str        # 回答文本
 
 
 # ---------- 节点 1：意图分类 ----------
 def classify_intent_node(state:AgentState)->dict:
-    intent, search_keywords = classify_intent_and_expand(
+    intent, topic_mode, search_keywords = classify_intent_and_expand(
         state["question"], _llm, state["history_text"]
     )
-    print(f"意图分类结果：{intent}, 搜索关键词：{search_keywords}")
-    return {"intent": intent, "search_keyword": search_keywords}
+    print(f"意图分类结果：{intent}, 话题关系：{topic_mode}, 搜索关键词：{search_keywords}")
+    update = {"intent": intent, "topic_mode": topic_mode, "search_keyword": search_keywords}
+    if topic_mode == "new":
+        # 分类仍看过旧记忆来判断“是否换题”，但推荐回答不能再带旧条件。
+        update["history_text"] = remove_structured_memory_from_context(state["history_text"])
+    return update
 
 # ---------- 节点 2：商品推荐（RAG）----------
 def product_node(state:AgentState)->dict:
@@ -1060,38 +1178,25 @@ def init_langgraph():
 
 
 
-def run_agent(question: str, history_text: str = "",
-              user_id: int = None, session_id: str = None) -> dict:
-    """
-    执行 LangGraph 工作流，返回最终 State
-
-    参数：
-        question:     用户问题
-        history_text: 格式化后的历史对话文本
-        user_id:      用户ID（传入则自动保存消息到数据库）
-        session_id:   会话ID（传入则复用，否则自动生成新会话）
-
-    返回格式：
-        {"answer": "...", "intent": "..."}
-    """
+def run_agent(question: str, history_text: str = "", user_id: int = None, session_id: str = None) -> dict:
+    """执行 Agent；每次仅把最近消息和会话级购物条件送入 Prompt。"""
     init_langgraph()
-
+    sid = (session_id or generate_session_id()) if user_id else None
+    memory = load_structured_memory(user_id, sid) if sid else {}
     initial_state: AgentState = {
-        "question": question,
-        "history_text": history_text,
-        "intent": "",
-        "search_keyword": "",
-        "answer": "",
+        "question": question, "history_text": merge_memory_into_context(history_text, memory),
+        "intent": "", "topic_mode": "", "search_keyword": "", "answer": "",
     }
-
     result = _graph.invoke(initial_state)
-
-    if user_id:
-        sid = session_id or generate_session_id()
+    if user_id and sid:
+        updated = update_structured_memory(
+            memory, question, result.get("intent", ""), result.get("search_keyword", ""),
+            result.get("topic_mode", "continue"),
+        )
+        save_structured_memory(user_id, sid, updated)
         save_message_to_db(user_id, sid, "user", question, intent=result.get("intent", ""))
         save_message_to_db(user_id, sid, "ai", result["answer"], intent=result.get("intent", ""))
         result["session_id"] = sid
-
     return result
 # ============================================================
 # 第五部分：演示 + 聊天模式（方便本地测试）

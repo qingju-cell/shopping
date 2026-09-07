@@ -118,14 +118,14 @@
           type="textarea"
           :autosize="{ minRows: 1, maxRows: 4 }"
           :placeholder="'请输入您的问题，按 Enter 发送，Shift+Enter 换行...'"
-          :disabled="isSending"
+          :disabled="isSending || isRestoringHistory"
           resize="none"
           @keydown="handleKeydown"
         />
         <el-button
           type="primary"
           class="send-btn"
-          :disabled="!inputText.trim() || isSending"
+          :disabled="!inputText.trim() || isSending || isRestoringHistory"
           :loading="isSending"
           @click="sendMessage"
         >
@@ -138,7 +138,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
 import {
   ChatDotRound,
   Close,
@@ -146,7 +146,7 @@ import {
   Promotion
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { aiChatApi, type ChatMessage } from '@/api/ai'
+import { aiChatApi, aiChatHistoryApi, type ChatMessage } from '@/api/ai'
 import { useUserStore } from '@/stores/user'
 
 // ============ 状态 ============
@@ -158,6 +158,11 @@ const isOpen = ref(false)
 const inputText = ref('')
 /** 是否正在发送中 */
 const isSending = ref(false)
+
+/** 是否正在从 MySQL 恢复当前会话，恢复中不允许抢先发送新消息。 */
+const isRestoringHistory = ref(false)
+/** 当前浏览器正在使用的会话编号；未登录或首次提问时为 null。 */
+const currentSessionId = ref<string | null>(null)
 /** 未读消息数（按钮上的小红点） */
 const unreadCount = ref(0)
 /** 消息列表 */
@@ -181,24 +186,67 @@ const usernameFirstChar = computed(() => {
 
 // ============ 方法 ============
 
-/** 打开聊天窗 */
-function openChat() {
-  isOpen.value = true
-  unreadCount.value = 0
-  nextTick(() => scrollToBottom())
+/** 当前用户专属的浏览器存储键，避免同一浏览器切换账号后串会话。 */
+function sessionStorageKey(): string | null {
+  const userId = userStore.userInfo?.id
+  return userId ? `shopping-ai-session:${userId}` : null
 }
 
+function saveCurrentSession(sessionId: string) {
+  currentSessionId.value = sessionId
+  const key = sessionStorageKey()
+  if (key) localStorage.setItem(key, sessionId)
+}
+
+/** 从 MySQL 恢复当前用户上次正在使用的那一段会话。 */
+async function restoreChatHistory() {
+  const userId = userStore.userInfo?.id
+  const key = sessionStorageKey()
+  const savedSessionId = key ? localStorage.getItem(key) : null
+  if (!userId || !savedSessionId || messages.value.length > 0) return
+
+  currentSessionId.value = savedSessionId
+  isRestoringHistory.value = true
+  try {
+    const res: any = await aiChatHistoryApi(userId, savedSessionId)
+    const savedMessages = res?.data?.messages || []
+    messages.value = savedMessages.map((message: any) => {
+      const parsedTime = Date.parse(message.time || '')
+      return {
+        role: message.role === 'ai' ? 'assistant' : 'user',
+        content: message.content,
+        timestamp: Number.isNaN(parsedTime) ? undefined : parsedTime
+      }
+    })
+  } catch (error) {
+    // 保留本地 session_id，网络恢复后下次打开聊天窗还能继续尝试恢复。
+    console.error('恢复 AI 聊天记录失败:', error)
+  } finally {
+    isRestoringHistory.value = false
+  }
+}
+
+/** 打开聊天窗；若本地保存了会话编号，则从数据库恢复它。 */
+async function openChat() {
+  isOpen.value = true
+  unreadCount.value = 0
+  await restoreChatHistory()
+  await nextTick()
+  scrollToBottom()
+}
 /** 关闭聊天窗 */
 function closeChat() {
   isOpen.value = false
 }
 
-/** 清空聊天记录 */
+/** 开始新会话：只取消当前会话引用，不删除 MySQL 中旧会话记录。 */
 function clearHistory() {
   messages.value = []
-  ElMessage.success('聊天记录已清空')
+  currentSessionId.value = null
+  const key = sessionStorageKey()
+  if (key) localStorage.removeItem(key)
+  ElMessage.success('已开始新的对话')
 }
-
 /** 发送快捷问题 */
 function sendQuickQuestion(q: string) {
   inputText.value = q
@@ -216,7 +264,11 @@ function handleKeydown(e: KeyboardEvent) {
 /** 发送消息主流程 */
 async function sendMessage() {
   const text = inputText.value.trim()
-  if (!text || isSending.value) return
+  if (!text || isSending.value || isRestoringHistory.value) return
+
+  // 先截取已经完成的旧对话。不能把本轮问题和稍后插入的空加载消息传给后端，
+  // 否则当前问题会在 question 与 history 中重复出现，浪费 Prompt Token。
+  const previousHistory = messages.value.slice(-10)
 
   // 1. 把用户消息加入列表
   const userMsg: ChatMessage = {
@@ -241,23 +293,26 @@ async function sendMessage() {
 
   try {
     // 3. 调用后端 AI 接口
-    const lastHistory = messages.value.slice(-10)  // 只带最近 10 条历史
     const res = await aiChatApi({
       question: text,
-      history: lastHistory.map(m => ({ role: m.role, content: m.content })),
-      user_id: userStore.userInfo?.id
+      history: previousHistory.map(m => ({ role: m.role, content: m.content })),
+      user_id: userStore.userInfo?.id,
+      session_id: currentSessionId.value || undefined
     })
 
-    // 4. 把占位消息替换成真实 AI 回答
+    // 4. 保存后端返回的会话编号。以后每次请求传回它，数据库就会追加到同一段对话。
+    const responseData = (res as any)?.data
+    if (responseData?.session_id) saveCurrentSession(responseData.session_id)
+
+    // 5. 把占位消息替换成真实 AI 回答
     const placeholderIdx = messages.value.length - 1
     messages.value[placeholderIdx] = {
       role: 'assistant',
-      content: (res as any)?.data?.answer || '抱歉，AI 暂时没有回答',
-      intent: (res as any)?.data?.intent || 'unknown',
+      content: responseData?.answer || '抱歉，AI 暂时没有回答',
+      intent: responseData?.intent || 'unknown',
       timestamp: Date.now(),
       loading: false
-    }
-  } catch (err: any) {
+    }  } catch (err: any) {
     // 出错时：替换占位消息为错误提示
     const placeholderIdx = messages.value.length - 1
     messages.value[placeholderIdx] = {
