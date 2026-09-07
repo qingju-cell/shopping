@@ -150,7 +150,9 @@ flowchart LR
     Nginx -->|/api/ 反向代理| Backend[FastAPI / backend 容器]
     Backend -->|SQL :3306| MySQL[(MySQL / db 容器)]
     Backend -->|缓存与分布式锁 :6379| Redis[(Redis / redis 容器)]
-    Backend -->|持久化向量数据| Chroma[(Chroma 数据卷)]
+Backend -->|持久化向量数据| Chroma[(Chroma 数据卷)]
+    Prometheus[Prometheus 容器] -->|每 5 秒抓取 /metrics| Backend
+    Grafana[Grafana 容器] -->|PromQL 查询| Prometheus
 ```
 
 - 浏览器只访问 `http://localhost:8080`；Nginx 负责发送 Vue 打包后的静态文件。
@@ -179,7 +181,7 @@ docker compose down
 - 前端：`http://localhost:8080`
 - 后端 API 文档：`http://localhost:8000/docs`
 
-部署细节见 [Docker 部署说明](docs/docker-deployment-guide.md)，测试细节见 [自动化测试说明](docs/testing-guide.md)。
+部署细节见 [Docker 部署说明](docs/docker-deployment-guide.md)，测试细节见 [自动化测试说明](docs/testing-guide.md)，监控细节见 [Prometheus + Grafana 说明](docs/monitoring-guide.md)。
 
 ---
 ## 快速开始

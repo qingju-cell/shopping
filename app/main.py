@@ -11,6 +11,7 @@
 # ============================================================
 
 from fastapi import FastAPI, HTTPException
+from prometheus_client import make_asgi_app
 from requests import RequestException
 from starlette.middleware.cors import CORSMiddleware
 
@@ -18,6 +19,7 @@ from app.api._init_ import api_router
 from app.common.exception_handler import global_exception_handler
 from app.config import settings
 from app.database import Base, engine
+from app.metrics import record_http_request, request_start_time
 
 # ---------- 1. 自动建表 ----------
 # 开发环境下，首次启动时会自动在数据库中创建所有表
@@ -45,6 +47,19 @@ app.add_middleware(
     allow_headers=["*"]         # 允许所有请求头
 )
 
+# ---------- HTTP 指标中间件 ----------
+# 每个请求结束后记录次数、响应状态和耗时；/metrics 本身不计入业务指标。
+@app.middleware("http")
+async def collect_http_metrics(request, call_next):
+    started_at = request_start_time()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        if not request.url.path.startswith("/metrics"):
+            record_http_request(request, status_code, started_at)
 # ---------- 4. 注册全局异常处理器 ----------
 # 当路由抛出异常时，会被这里统一捕获并返回规范的错误响应
 # 注册了三类异常：
@@ -60,6 +75,9 @@ app.add_exception_handler(Exception, global_exception_handler)
 # 前缀为 /api，所以所有接口地址都是 /api/xxx
 app.include_router(api_router)
 
+# ---------- Prometheus 指标端点 ----------
+# Prometheus 容器会定期访问 /metrics，读取上述中间件记录的指标。
+app.mount("/metrics", make_asgi_app())
 # ---------- 6. 健康检测接口 ----------
 # 用于运维监控，检查服务是否正常运行
 # 访问 http://localhost:8000/health 返回 {"status":"ok","msg":"服务正常"}

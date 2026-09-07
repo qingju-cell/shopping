@@ -35,6 +35,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.embeddings import Embeddings
 from langchain_chroma import Chroma as LCChroma
+from app.metrics import record_llm_token_usage
 
 # ---------- LangGraph ----------
 from langgraph.graph import StateGraph, END
@@ -601,6 +602,7 @@ def classify_intent_by_llm(question, llm,history_text):
     """用 LLM 模型分类用户意图"""
     prompt = get_intent_prompt_template()
     response = llm.invoke(prompt.format(question=question, history_text=history_text))
+    record_llm_token_usage(response, "intent_classification")
     return response.content.strip().lower()
 
 
@@ -613,6 +615,7 @@ def classify_intent_and_expand(question, llm, history_text):
     """
     prompt = get_intent_and_expand_prompt_template()
     response = llm.invoke(prompt.format(question=question, history_text=history_text))
+    record_llm_token_usage(response, "intent_classification")
     raw = response.content.strip()
     
     # 解析 "product|手机 便宜 性价比" 格式
@@ -690,6 +693,7 @@ def _expand_query_by_llm(question, history_text, llm):
             question=question,
             history_text=history_text if history_text else "（无历史对话）"
         ))
+        record_llm_token_usage(response, "query_expansion")
         keywords = response.content.strip()
         expanded = f"{question} {keywords}"
         print(f"  🔧 大模型查询扩展：{expanded}")
@@ -802,6 +806,7 @@ def build_product_chain(vectorstore, llm):
         # Step 4：Prompt → LLM → 解析文本
         prompt_value = prompt.invoke(prompt_inputs)
         llm_result = llm.invoke(prompt_value)
+        record_llm_token_usage(llm_result, "product_answer")
         answer = output_parser.invoke(llm_result)
         return answer
 
@@ -823,6 +828,7 @@ def build_chat_chain(llm):
             "history_text": input_dict.get("history_text", "（无历史对话）"),
         })
         llm_result = llm.invoke(prompt_value)
+        record_llm_token_usage(llm_result, "chat_answer")
         return output_parser.invoke(llm_result)
 
     return RunnableLambda(_chat_with_memory)

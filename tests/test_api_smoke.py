@@ -24,6 +24,12 @@ def test_openapi_docs_are_available():
     assert "Swagger UI" in response.text
 
 
+def test_prometheus_metrics_are_available():
+    response = requests.get(f"{BASE_URL}/metrics", timeout=TIMEOUT_SECONDS)
+    assert response.status_code == 200
+    assert "shopping_http_requests_total" in response.text
+    assert "shopping_http_request_duration_seconds" in response.text
+
 def test_category_list_has_valid_parent_ids():
     categories = get_json("/api/category/")
     assert isinstance(categories, list)
