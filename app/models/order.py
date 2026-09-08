@@ -33,12 +33,9 @@ class Order(Base):
     total_amount = Column(DECIMAL(10, 2), nullable=False, comment="订单总金额")
 
     # ---------- 订单状态 ----------
-    # 0: 待付款
-    # 1: 已付款
-    # 2: 已发货
-    # 3: 已完成
-    # 4: 已取消
-    status = Column(SmallInteger, default=0, comment="订单状态：0待付款 1已付款 2已发货 3已完成 4已取消")
+    # 订单状态在后端和前端共用同一套编号，不能各自定义：
+    # 0: 待支付 -> 1: 已支付 -> 2: 已发货 -> 3: 已完成；4: 已取消
+    status = Column(SmallInteger, default=0, comment="订单状态：0待支付 1已支付 2已发货 3已完成 4已取消")
 
     # ---------- 收货信息 ----------
     receiver_name = Column(String(50), comment="收货人姓名")

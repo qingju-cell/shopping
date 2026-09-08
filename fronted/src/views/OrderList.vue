@@ -130,15 +130,13 @@
               -->
               <el-button size="small" @click="viewDetail(order)">查看详情</el-button>
 
-              <!-- 
-                立即支付按钮
-                v-if="order.status === 1" 只有当订单状态为 1（待支付）时才显示
-                现在只是 UI 占位，后续可以接入支付接口
-              -->
+              <!-- status=0 才是待支付；点击后调用后端支付接口。 -->
               <el-button
-                v-if="order.status === 1"
+                v-if="order.status === 0"
                 type="primary"
                 size="small"
+                :loading="payingOrderId === order.id"
+                @click="handlePayment(order)"
               >
                 立即支付
               </el-button>
@@ -295,9 +293,8 @@
   // useRouter：路由对象，用来跳转页面
   import { useRouter } from 'vue-router'
 
-  // getMyOrders：获取订单列表的接口函数
-  // getOrderDetail：获取单个订单详情的接口函数
-  import { getMyOrders, getOrderDetail } from '@/api/order'
+  // getMyOrders：获取订单列表；getOrderDetail：获取详情；payOrder：模拟支付
+  import { getMyOrders, getOrderDetail, payOrder } from '@/api/order'
 
   // useUserStore：用户状态管理（Pinia store），里面存着当前登录用户的信息
   import { useUserStore } from '@/stores/user'
@@ -340,6 +337,9 @@
   // 类型是 Order | null，初始为 null（没有选择任何订单）
   const currentOrder = ref<Order | null>(null)
 
+  // 当前正在支付的订单 ID；用于只让被点击的按钮显示加载中。
+  const payingOrderId = ref<number | null>(null)
+
 
   // ===== 4. 定义函数（页面上的操作） =====
 
@@ -370,18 +370,17 @@
 
   /**
    * getStatusText：把数字状态码转换成文字
-   * 例如：传入 1 返回 '待支付'，传入 4 返回 '已完成'
-   * @param status 订单状态数字（0-5）
+   * 例如：传入 0 返回 '待支付'，传入 3 返回 '已完成'
+   * @param status 订单状态数字（0-4）
    */
   function getStatusText(status: number): string {
     // 定义一个「字典」：状态码 → 对应文字
     const statusMap: Record<number, string> = {
       0: '待支付',
-      1: '待支付',
-      2: '已支付',
-      3: '已发货',
-      4: '已完成',
-      5: '已取消'
+      1: '已支付',
+      2: '已发货',
+      3: '已完成',
+      4: '已取消'
     }
     // 从字典里取，取不到就返回 '未知状态'
     return statusMap[status] || '未知状态'
@@ -397,11 +396,10 @@
     // warning=黄色, primary=蓝色, info=灰色, success=绿色
     const typeMap: Record<number, string> = {
       0: 'warning',   // 待支付 → 黄色（提醒）
-      1: 'warning',   // 待支付 → 黄色（提醒）
-      2: 'primary',   // 已支付 → 蓝色
-      3: 'info',      // 已发货 → 灰色
-      4: 'success',   // 已完成 → 绿色（成功）
-      5: 'info'       // 已取消 → 灰色
+      1: 'primary',   // 已支付 → 蓝色
+      2: 'info',      // 已发货 → 灰色
+      3: 'success',   // 已完成 → 绿色（成功）
+      4: 'info'       // 已取消 → 灰色
     }
     return typeMap[status] || 'info'
   }
@@ -482,6 +480,21 @@
       // 最外层的错误处理：打印错误 + 给用户提示
       console.error('打开订单详情失败:', error)
       ElMessage.error('打开订单详情失败')
+    }
+  }
+
+  /** 点击待支付订单的“立即支付”：后端把状态从 0 原子更新为 1。 */
+  async function handlePayment(order: Order) {
+    payingOrderId.value = order.id
+    try {
+      await payOrder(order.id, userStore.userId)
+      ElMessage.success('支付成功')
+      // 支付完成后跳转详情页，用户能立刻看到“已支付”的最新状态。
+      router.push(`/orders/${order.id}`)
+    } catch (error) {
+      console.error('支付订单失败:', error)
+    } finally {
+      payingOrderId.value = null
     }
   }
 

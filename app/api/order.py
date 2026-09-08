@@ -5,6 +5,7 @@
 #   - POST   /api/orders            创建订单（下单）
 #   - GET    /api/orders            查询当前用户的订单列表
 #   - GET    /api/orders/{id}       查询订单详情
+#   - POST   /api/orders/{id}/pay   模拟支付待支付订单
 # 注意：目前 user_id 暂用固定值 1，后期接入登录认证后改为从 token 获取
 # ============================================================
 
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/orders", tags=["订单模块"])
 # ---------- 创建订单（下单）----------
 @router.post("", summary="创建订单")
 def create_order(order_in: OrderCreate, user_id: int = 1, 
-                 db: Session = Depends(get_db)):
+                  db: Session = Depends(get_db)):
     """
     创建新订单
     - order_in: 包含商品列表、收货人信息、备注等
@@ -30,6 +31,15 @@ def create_order(order_in: OrderCreate, user_id: int = 1,
     """
     order = OrderService.create_order(db, user_id, order_in)
     return ApiResponse.success(data=OrderResponse.model_validate(order), msg="下单成功")
+
+
+# ---------- 模拟支付 ----------
+@router.post("/{order_id}/pay", summary="模拟支付订单")
+def pay_order(order_id: int, user_id: int = 1,
+              db: Session = Depends(get_db)):
+    """支付已创建的待支付订单；库存已在创建订单时扣减，不会重复扣减。"""
+    order = OrderService.pay_order(db, user_id, order_id)
+    return ApiResponse.success(data=OrderResponse.model_validate(order), msg="支付成功")
 
 
 # ---------- 查询我的订单列表 ----------

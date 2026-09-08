@@ -18,11 +18,11 @@
         <div :class="['status-banner', `status-${order.status}`]">
           <div class="banner-left">
             <el-icon size="32" class="banner-icon">
-              <!-- 根据状态显示不同图标：已完成=对勾，待支付=时钟，已发货=货车... -->
-              <CircleCheck v-if="order.status === 4" />
-              <Clock v-else-if="order.status === 0 || order.status === 1" />
-              <Van v-else-if="order.status === 3" />
-              <Warning v-else-if="order.status === 5" />
+              <!-- 根据统一状态显示图标：已完成=对勾，待支付=时钟，已发货=货车。 -->
+              <CircleCheck v-if="order.status === 3" />
+              <Clock v-else-if="order.status === 0" />
+              <Van v-else-if="order.status === 2" />
+              <Warning v-else-if="order.status === 4" />
               <Goods v-else />
             </el-icon>
             <div class="banner-text">
@@ -37,9 +37,11 @@
           <!-- 右侧操作按钮（待支付时显示「立即支付」） -->
           <div class="banner-actions">
             <el-button
-              v-if="order.status === 0 || order.status === 1"
+              v-if="order.status === 0"
               type="primary"
               size="large"
+              :loading="paying"
+              @click="handlePayment"
             >
               立即支付
             </el-button>
@@ -153,7 +155,7 @@ import {
   Warning,
   Goods,
 } from '@element-plus/icons-vue'
-import { getOrderDetail } from '@/api/order'
+import { getOrderDetail, payOrder } from '@/api/order'
 import { useUserStore } from '@/stores/user'
 import { PLACEHOLDER_IMG } from '@/constants/placeholder'
 import { ElMessage } from 'element-plus'
@@ -166,6 +168,7 @@ const userStore = useUserStore()
 const loading = ref(false)
 const order = ref<Order | null>(null)
 const errorMsg = ref('')
+const paying = ref(false)
 
 /** 从路由参数拿订单 ID（例如 /orders/12 → 12） */
 function getOrderIdFromRoute(): number | null {
@@ -198,22 +201,20 @@ async function fetchDetail() {
 function getStatusText(status: number): string {
   const statusMap: Record<number, string> = {
     0: '待支付',
-    1: '待支付',
-    2: '已支付',
-    3: '已发货',
-    4: '已完成',
-    5: '已取消',
+    1: '已支付',
+    2: '已发货',
+    3: '已完成',
+    4: '已取消',
   }
   return statusMap[status] || '未知状态'
 }
 function getStatusType(status: number): string {
   const typeMap: Record<number, string> = {
     0: 'warning',
-    1: 'warning',
-    2: 'primary',
-    3: 'info',
-    4: 'success',
-    5: 'info',
+    1: 'primary',
+    2: 'info',
+    3: 'success',
+    4: 'info',
   }
   return typeMap[status] || 'info'
 }
@@ -231,6 +232,21 @@ function formatDate(dateStr: string): string {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+/** 当前详情页的支付按钮：成功后用后端返回的最新订单替换页面状态。 */
+async function handlePayment() {
+  if (!order.value) return
+  paying.value = true
+  try {
+    const res: any = await payOrder(order.value.id, userStore.userId)
+    order.value = res?.data || res
+    ElMessage.success('支付成功')
+  } catch (error) {
+    console.error('支付订单失败:', error)
+  } finally {
+    paying.value = false
+  }
 }
 
 // ===== 跳转相关 =====

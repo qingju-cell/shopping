@@ -24,6 +24,11 @@ from app.schemas.order import OrderCreate
 
 
 class OrderService:
+    PENDING_PAYMENT = 0
+    PAID = 1
+    SHIPPED = 2
+    COMPLETED = 3
+    CANCELLED = 4
 
     # ---------- 生成订单编号 ----------
     @staticmethod
@@ -151,3 +156,38 @@ class OrderService:
         if not order:
             raise HTTPException(status_code=404, detail="订单不存在")
         return order
+
+    # ---------- 模拟支付 ----------
+    @staticmethod
+    def pay_order(db: Session, user_id: int, order_id: int):
+        """将待支付订单更新为已支付。
+
+        库存在 create_order() 中已通过同一笔下单事务扣减；这里绝不能再次扣库存。
+        with_for_update() 会在支付状态切换期间锁住订单行，避免同一订单被两个请求同时支付。
+        """
+        try:
+            with db.begin_nested():
+                order = db.query(Order).filter(
+                    Order.id == order_id,
+                    Order.user_id == user_id,
+                ).with_for_update().first()
+
+                if not order:
+                    raise HTTPException(status_code=404, detail="订单不存在")
+
+                # 网络重试或用户连点时，已支付订单直接返回，保证接口幂等。
+                if order.status == OrderService.PAID:
+                    pass
+                elif order.status == OrderService.PENDING_PAYMENT:
+                    order.status = OrderService.PAID
+                else:
+                    raise HTTPException(status_code=400, detail="当前订单状态不能支付")
+
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        return db.query(Order).options(
+            joinedload(Order.order_items)
+        ).filter(Order.id == order_id).first()
