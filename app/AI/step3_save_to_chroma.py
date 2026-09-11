@@ -201,7 +201,9 @@ def create_chroma_db(documents, metadatas):
 
     # 3.1 使用智谱 AI 嵌入模型（和查询时保持一致，维度必须匹配！）
     from deepseek_emb import BigModelEmbeddingFunction
-    embedding_func = BigModelEmbeddingFunction(dimensions=768)
+    # 写入和查询都必须使用同一嵌入模型、同一向量维度；ai_core.py 查询端是 512 维。
+    # 维度不一致的向量不能比较距离，因此这里也固定为 512。
+    embedding_func = BigModelEmbeddingFunction(dimensions=512)
     print(f"使用智谱AI嵌入模型：{embedding_func.model}（维度：{embedding_func.dimensions}）")
 
     # 3.2 创建 Chroma 客户端

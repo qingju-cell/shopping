@@ -19,6 +19,11 @@
         </div>
 
         <div class="product-meta">
+          <!-- 对外展示 PR 编号；后端会从 PR500 中取出 500，再使用内部主键查库存和下单。 -->
+          <div class="meta-item">
+            <span class="meta-label">商品编号：</span>
+            <span class="meta-value product-id">{{ product.product_code }}</span>
+          </div>
           <div class="meta-item">
             <span class="meta-label">库存：</span>
             <span class="meta-value">{{ product.stock }} 件</span>
@@ -230,6 +235,13 @@ onMounted(() => {
 .meta-value {
   font-size: 14px;
   color: #303133;
+}
+
+/* 编号是供用户核对和告诉 AI 的稳定标识，不随商品名称修改而改变。 */
+.product-id {
+  color: #409eff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
 }
 
 .product-description {

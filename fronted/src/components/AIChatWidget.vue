@@ -102,6 +102,54 @@
               <div v-if="!msg.loading" class="msg-content" v-html="formatAnswer(msg.content)"></div>
             </div>
 
+            <!-- 商品咨询才有卡片；普通闲聊、历史消息不会显示这一块。 -->
+            <div v-if="msg.recommendedProducts?.length" class="recommended-products">
+              <button
+                v-for="product in msg.recommendedProducts"
+                :key="product.id"
+                type="button"
+                class="recommended-product-card"
+                :aria-label="`查看商品：${product.name}`"
+                @click="goToProduct(product.id)"
+              >
+                <img
+                  class="recommended-product-image"
+                  :src="product.image_url || PLACEHOLDER_IMG['80x80']"
+                  :alt="product.name"
+                >
+                <span class="recommended-product-info">
+                  <strong>{{ product.name }}</strong>
+                  <span class="recommended-product-code">商品编号：{{ product.product_code }}</span>
+                  <span class="recommended-product-price">¥{{ product.price }}</span>
+                  <span class="recommended-product-stock">库存 {{ product.stock }} 件 · 查看详情 ›</span>
+                </span>
+              </button>
+            </div>
+
+            <!-- 仅当后端确认三项收货信息齐全时展示；这不是支付按钮，也不创建订单。 -->
+            <section v-if="msg.orderDraft?.can_confirm" class="order-draft-card">
+              <strong class="order-draft-title">订单确认单（尚未提交）</strong>
+              <div v-for="item in msg.orderDraft.items" :key="item.product_id" class="order-draft-item">
+                <span>{{ item.product_name }}（{{ item.product_code }}）× {{ item.quantity }}</span>
+                <span>¥{{ item.subtotal }}</span>
+              </div>
+              <p class="order-draft-total">合计：¥{{ msg.orderDraft.total_amount }}</p>
+              <p>收货人：{{ msg.orderDraft.receiver_name }}（{{ msg.orderDraft.receiver_phone }}）</p>
+              <p>地址：{{ msg.orderDraft.receiver_address }}</p>
+              <p v-if="msg.orderDraft.remark">备注：{{ msg.orderDraft.remark }}</p>
+              <p class="order-draft-tip">请核对信息；回复“确认提交”后才会创建订单并进入支付步骤。</p>
+            </section>
+
+            <!-- 真实订单创建成功后才显示。点击只跳转，支付仍由订单详情页的原有按钮负责。 -->
+            <section v-if="msg.createdOrder" class="created-order-card">
+              <strong>订单已创建，等待支付</strong>
+              <p>订单号：{{ msg.createdOrder.order_no }}</p>
+              <p>应付金额：¥{{ msg.createdOrder.total_amount }}</p>
+              <button type="button" class="go-order-button" @click="goToOrder(msg.createdOrder.id)">
+                前往订单详情并支付
+              </button>
+            </section>
+
             <!-- 消息时间 -->
             <span v-if="msg.timestamp && !msg.loading" class="msg-time">
               {{ formatTime(msg.timestamp) }}
@@ -139,6 +187,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   ChatDotRound,
   Close,
@@ -147,10 +196,12 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { aiChatApi, aiChatHistoryApi, type ChatMessage } from '@/api/ai'
+import { PLACEHOLDER_IMG } from '@/constants/placeholder'
 import { useUserStore } from '@/stores/user'
 
 // ============ 状态 ============
 const userStore = useUserStore()
+const router = useRouter()
 
 /** 聊天窗是否打开 */
 const isOpen = ref(false)
@@ -310,6 +361,10 @@ async function sendMessage() {
       role: 'assistant',
       content: responseData?.answer || '抱歉，AI 暂时没有回答',
       intent: responseData?.intent || 'unknown',
+      // API 用 snake_case；前端消息对象用 camelCase，方便模板读取。
+      recommendedProducts: responseData?.recommended_products || [],
+      orderDraft: responseData?.order_draft || undefined,
+      createdOrder: responseData?.created_order || undefined,
       timestamp: Date.now(),
       loading: false
     }  } catch (err: any) {
@@ -326,6 +381,18 @@ async function sendMessage() {
     isSending.value = false
     await nextTick(scrollToBottom)
   }
+}
+
+/** 点击卡片只负责跳转；详情页会按 ID 重新读取最新价格和库存。 */
+function goToProduct(productId: number) {
+  isOpen.value = false
+  router.push(`/products/${productId}`)
+}
+
+/** 使用后端返回的真实订单主键跳转；订单详情页负责展示状态和模拟支付。 */
+function goToOrder(orderId: number) {
+  isOpen.value = false
+  router.push(`/orders/${orderId}`)
 }
 
 /** 滚动消息列表到底部 */
@@ -631,6 +698,101 @@ onMounted(() => {
 }
 .msg-content :deep(strong) {
   font-weight: 600;
+}
+
+/* AI 商品推荐卡片：独立于文字气泡，点击后进入已有商品详情页。 */
+.recommended-products {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.recommended-product-card {
+  width: 100%;
+  display: flex;
+  gap: 10px;
+  padding: 9px;
+  text-align: left;
+  color: #303133;
+  background: #fff;
+  border: 1px solid #d9ecff;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color .2s, transform .2s, box-shadow .2s;
+}
+.recommended-product-card:hover {
+  border-color: #409eff;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(64, 158, 255, .16);
+}
+.recommended-product-image {
+  width: 52px;
+  height: 52px;
+  object-fit: cover;
+  border-radius: 7px;
+  background: #f5f7fa;
+  flex-shrink: 0;
+}
+.recommended-product-info {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+.recommended-product-info strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recommended-product-price {
+  color: #f56c6c;
+  font-weight: 700;
+}
+.recommended-product-stock {
+  color: #909399;
+  font-size: 11px;
+}
+
+/* 后端给出的订单草稿：用户看见、核对，但尚未真正提交。 */
+.order-draft-card {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px;
+  color: #303133;
+  background: #f0f9eb;
+  border: 1px solid #c2e7b0;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.order-draft-title { display: block; margin-bottom: 8px; color: #529b2e; }
+.order-draft-item { display: flex; justify-content: space-between; gap: 12px; margin: 4px 0; }
+.order-draft-card p { margin: 5px 0; line-height: 1.5; word-break: break-all; }
+.order-draft-total { color: #f56c6c; font-size: 14px; font-weight: 700; }
+.order-draft-tip { color: #909399; font-size: 12px; }
+
+/* 绿色确认单和蓝色“已创建”卡片分开，提醒用户订单已生成但还未支付。 */
+.created-order-card {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px;
+  color: #303133;
+  background: #ecf5ff;
+  border: 1px solid #b3d8ff;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.created-order-card strong { color: #409eff; }
+.created-order-card p { margin: 6px 0; }
+.go-order-button {
+  margin-top: 5px;
+  padding: 7px 10px;
+  color: #fff;
+  background: #409eff;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
 }
 
 .msg-time {

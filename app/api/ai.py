@@ -33,8 +33,20 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """AI 聊天响应体"""
     answer: str = Field(..., description="AI 的回答")
-    intent: str = Field(default="unknown", description="识别到的意图：product/chat/service/abuse")
+    intent: str = Field(default="unknown", description="识别到的意图：product/chat/service/abuse/purchase")
     session_id: Optional[str] = Field(default=None, description="本次消息所属会话ID；登录用户可用于续聊")
+    recommended_products: List[dict] = Field(
+        default_factory=list,
+        description="商品咨询时返回的实时推荐商品，前端可据此渲染跳转详情页的卡片",
+    )
+    order_draft: Optional[dict] = Field(
+        default=None,
+        description="收货信息齐全时返回的待确认订单；尚未创建真实订单、尚未扣库存",
+    )
+    created_order: Optional[dict] = Field(
+        default=None,
+        description="用户确认后创建的待支付订单摘要；前端可用 id 跳转订单详情页",
+    )
 
 
 # ---------- 创建路由 ----------
@@ -80,6 +92,9 @@ def ai_chat(req: ChatRequest):
 
     # 2. 调用唯一的 LangGraph Agent。它内部只做一次意图分类，再按结果路由。
     session_id = None
+    recommended_products = []
+    order_draft = None
+    created_order = None
     try:
         result = run_agent(question, history_text,
                            user_id=req.user_id,
@@ -87,6 +102,9 @@ def ai_chat(req: ChatRequest):
         answer = result["answer"]
         intent = result["intent"]
         session_id = result.get("session_id")
+        recommended_products = result.get("recommended_products", [])
+        order_draft = result.get("order_draft")
+        created_order = result.get("created_order")
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -97,7 +115,14 @@ def ai_chat(req: ChatRequest):
 
     # 3. 返回规范的 ApiResponse
     return ApiResponse.success(
-        data=ChatResponse(answer=answer, intent=intent, session_id=session_id)
+        data=ChatResponse(
+            answer=answer,
+            intent=intent,
+            session_id=session_id,
+            recommended_products=recommended_products,
+            order_draft=order_draft,
+            created_order=created_order,
+        )
     )
 
 

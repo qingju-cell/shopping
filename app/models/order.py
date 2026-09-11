@@ -28,6 +28,8 @@ class Order(Base):
     # ---------- 订单基本信息 ----------
     # order_no 是业务编号，唯一，用于展示给用户（不同于自增 ID）
     order_no = Column(String(32), unique=True, nullable=False, comment="订单编号")
+    # 同一个 AI 草稿只允许生成一张订单；普通页面下单时该字段为 NULL。
+    agent_draft_id = Column(String(36), unique=True, nullable=True, index=True, comment="AI 下单草稿唯一编号")
     user_id = Column(Integer, nullable=False, comment="用户ID")
     # total_amount 是订单总金额（所有明细的小计之和）
     total_amount = Column(DECIMAL(10, 2), nullable=False, comment="订单总金额")

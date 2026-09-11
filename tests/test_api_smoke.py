@@ -49,4 +49,5 @@ def test_product_page_and_detail_are_available():
     product_id = page["list"][0]["id"]
     product = get_json(f"/api/products/{product_id}")
     assert product["id"] == product_id
+    assert product["product_code"] == f"PR{product_id}"
     assert product["name"]

@@ -16,6 +16,7 @@ import time
 from decimal import Decimal
 
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.order import Order, OrderItem
@@ -44,7 +45,12 @@ class OrderService:
 
     # ---------- 创建订单（核心方法）----------
     @staticmethod
-    def create_order(db: Session, user_id: int, order_in: OrderCreate):
+    def create_order(
+        db: Session,
+        user_id: int,
+        order_in: OrderCreate,
+        agent_draft_id: str | None = None,
+    ):
         """
         创建订单：整个过程在一个事务中，任何步骤失败都会全部回滚
         
@@ -65,62 +71,71 @@ class OrderService:
         - 锁住查询到的商品行，直到事务提交
         - 防止多个请求同时扣减同一商品的库存（超卖问题）
         """
+        # AI 的网络重试先按草稿编号找旧订单；普通页面下单没有该编号，不受影响。
+        if agent_draft_id:
+            existing = db.query(Order).filter(Order.agent_draft_id == agent_draft_id).first()
+            if existing:
+                return db.query(Order).options(
+                    joinedload(Order.order_items)
+                ).filter(Order.id == existing.id).first()
+
         total_amount = Decimal("0")
-
-        # begin_nested 开启一个嵌套事务
-        # 如果中间任何一步失败，整个订单创建都会回滚（包括已扣减的库存）
-        with db.begin_nested():
-
-            # 2. 创建订单主记录（总金额先填 0，后面再更新）
-            db_order = Order(
-                order_no=OrderService.generate_order_no(),
-                user_id=user_id,
-                total_amount=Decimal("0"),
-                receiver_name=order_in.receiver_name,
-                receiver_phone=order_in.receiver_phone,
-                receiver_address=order_in.receiver_address,
-                remark=order_in.remark,
-            )
-            db.add(db_order)
-            # flush 让数据库生成自增 ID，这样后面的 OrderItem 才能引用 order_id
-            db.flush()
-
-            # 3. 遍历每个商品，创建订单明细
-            for item in order_in.items:
-                # 查询商品并加行锁（with_for_update）
-                product = db.query(Product).filter(
-                    Product.id == item.product_id,
-                    Product.status == 1  # 只允许上架的商品下单
-                ).with_for_update().first()
-
-                if not product:
-                    raise HTTPException(status_code=404, detail="商品不存在或已下架")
-                if product.stock < item.quantity:
-                    raise HTTPException(status_code=400, detail="商品库存不足")
-
-                # 扣减库存
-                product.stock -= item.quantity
-                
-                # 计算小计金额
-                subtotal = Decimal(product.price) * item.quantity
-                total_amount += subtotal
-
-                # 创建订单明细记录
-                db_order_item = OrderItem(
-                    order_id=db_order.id,
-                    product_id=product.id,
-                    product_name=product.name,      # 商品名称快照
-                    product_price=product.price,    # 商品单价快照
-                    quantity=item.quantity,
-                    subtotal=subtotal,
+        try:
+            # begin_nested 开启一个嵌套事务；中途失败则库存和订单一起回滚。
+            with db.begin_nested():
+                db_order = Order(
+                    order_no=OrderService.generate_order_no(),
+                    agent_draft_id=agent_draft_id,
+                    user_id=user_id,
+                    total_amount=Decimal("0"),
+                    receiver_name=order_in.receiver_name,
+                    receiver_phone=order_in.receiver_phone,
+                    receiver_address=order_in.receiver_address,
+                    remark=order_in.remark,
                 )
-                db.add(db_order_item)
+                db.add(db_order)
+                # flush 让数据库生成自增 ID，这样后面的 OrderItem 才能引用 order_id。
+                db.flush()
 
-            # 4. 更新订单总金额（此时所有明细的小计已累加完成）
-            db_order.total_amount = total_amount
+                for item in order_in.items:
+                    product = db.query(Product).filter(
+                        Product.id == item.product_id,
+                        Product.status == 1,
+                    ).with_for_update().first()
+                    if not product:
+                        raise HTTPException(status_code=404, detail="商品不存在或已下架")
+                    if product.stock < item.quantity:
+                        raise HTTPException(status_code=400, detail="商品库存不足")
 
-        # 5. 提交事务（所有操作一次性生效）
-        db.commit()
+                    product.stock -= item.quantity
+                    subtotal = Decimal(product.price) * item.quantity
+                    total_amount += subtotal
+                    db.add(OrderItem(
+                        order_id=db_order.id,
+                        product_id=product.id,
+                        product_name=product.name,
+                        product_price=product.price,
+                        quantity=item.quantity,
+                        subtotal=subtotal,
+                    ))
+
+                db_order.total_amount = total_amount
+
+            # 所有操作一次性生效。
+            db.commit()
+        except IntegrityError:
+            # 两个请求同时确认同一 draft_id 时，唯一约束只允许一个创建；另一个取回原订单。
+            db.rollback()
+            if agent_draft_id:
+                existing = db.query(Order).filter(Order.agent_draft_id == agent_draft_id).first()
+                if existing:
+                    return db.query(Order).options(
+                        joinedload(Order.order_items)
+                    ).filter(Order.id == existing.id).first()
+            raise
+        except Exception:
+            db.rollback()
+            raise
 
         # 6. 重新查询订单，并预加载订单明细
         # joinedload 解决 SQLAlchemy 懒加载问题

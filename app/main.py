@@ -19,6 +19,7 @@ from app.api._init_ import api_router
 from app.common.exception_handler import global_exception_handler
 from app.config import settings
 from app.database import Base, engine
+from app.db_migrations import ensure_order_agent_draft_id_column
 # Register before create_all so the new table is created at startup.
 from app.models.ai_chat_session import AIChatSession  # noqa: F401
 from app.metrics import record_http_request, request_start_time
@@ -27,6 +28,8 @@ from app.metrics import record_http_request, request_start_time
 # 开发环境下，首次启动时会自动在数据库中创建所有表
 # 生产环境建议使用 Alembic 等迁移工具管理表结构
 Base.metadata.create_all(bind=engine)
+# create_all 只会新建表，不会给已有 orders 表补列；开发环境启动时安全补上本次新增列。
+ensure_order_agent_draft_id_column()
 
 # ---------- 2. 创建 FastAPI 应用实例 ----------
 # title/description/version 会显示在 Swagger 文档（/docs）页面

@@ -10,36 +10,65 @@
 # 好处：维护一个文件就行，不用在多个文件之间跳来跳去
 # ============================================================
 
+# Python 标准库：路径定位、JSON 会话记忆和偏好/预算处理。
 import os
 import sys
 import json
-import re
 from datetime import datetime
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
 # ---------- 路径设置 ----------
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# 读取 .env 中的 DeepSeek/智谱 API 密钥。
 from dotenv import load_dotenv
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(env_path)
 
+# requests 调智谱 Embedding HTTP 接口；numpy 把向量转换为 API 所需格式。
 import requests
 import numpy as np
 
 # ---------- LangChain 组件 ----------
+# LangChain：DeepSeek 对话模型、Prompt、输出解析、可组合执行链与消息类型。
 from langchain_deepseek import ChatDeepSeek
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.embeddings import Embeddings
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+# Chroma：商品向量库；metrics：将实际 Token 用量写到 Prometheus。
 from langchain_chroma import Chroma as LCChroma
 from app.metrics import record_llm_token_usage
+# Agent 可调用的业务工具白名单；模型不能直接执行任意 Python 函数。
+from app.AI.agent_tools import ORDER_AGENT_TOOLS
+# 订单草稿：只有收货信息完整时，才组装给当前用户核对的确认单。
+from app.AI.order_draft import build_order_draft_confirmation
+# 记忆模块：聊天记录、结构化偏好、会话编号和 Prompt 上下文组装。
+from app.AI.memory import (
+    _get_db_session,
+    format_structured_memory_for_prompt,
+    format_memory_for_prompt,
+    generate_session_id,
+    get_memory_file_path,
+    load_history_from_db,
+    load_memory,
+    load_structured_memory,
+    merge_memory_into_context,
+    remove_structured_memory_from_context,
+    save_memory,
+    save_message_to_db,
+    save_structured_memory,
+    update_structured_memory,
+)
 
 # ---------- LangGraph ----------
+# LangGraph：声明 Agent 流程图、消息追加规则和工具执行节点。
 from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
 
 
 # ============================================================
@@ -245,234 +274,6 @@ def _rerank_by_intent(question, results_list, n=3):
 
 
 # ============================================================
-# 第三部分：LangChain RAG 全套（原 step5_rag_chatbot_langchain.py）
-# ============================================================
-# ============================================================
-# 记忆功能 V1：JSON 文件保存（最简单的版本）
-# ============================================================
-def get_memory_file_path():
-    """获取记忆文件的完整路径（和脚本同目录）"""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.json")
-
-
-def load_memory():
-    """
-    从 JSON 文件加载历史对话
-    返回格式：
-      [
-        {"role": "user", "content": "你好"},
-        {"role": "ai",  "content": "你好呀~"},
-        ...
-      ]
-    """
-    memory_file = get_memory_file_path()
-    if not os.path.exists(memory_file):
-        print(f"📝 没找到历史记忆文件，开始新对话（{os.path.basename(memory_file)}）")
-        return []
-    try:
-        with open(memory_file, "r", encoding="utf-8") as f:
-            history = json.load(f)
-        print(f"💾 已加载历史记忆：{len(history)//2} 轮对话")
-        return history
-    except Exception as e:
-        print(f"⚠️  记忆文件读取失败，忽略历史：{e}")
-        return []
-
-
-def save_memory(history):
-    """把历史对话保存到 JSON 文件"""
-    memory_file = get_memory_file_path()
-    try:
-        with open(memory_file, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
-        print(f"💾 记忆已保存：{len(history)//2} 轮 → {os.path.basename(memory_file)}")
-    except Exception as e:
-        print(f"⚠️  记忆保存失败：{e}")
-
-
-# ---------- 数据库版：历史消息持久化 ----------
-import uuid
-
-def _get_db_session():
-    """获取数据库会话（懒加载，避免文件被 import 时就连数据库）"""
-    from app.database import SessionLocal
-    return SessionLocal()
-
-
-def save_message_to_db(user_id: int, session_id: str, role: str,
-                       content: str, intent: str = ""):
-    """保存单条消息到 ai_chat_messages 表"""
-    try:
-        from app.models.ai_chat_message import AIChatMessage
-        db = _get_db_session()
-        msg = AIChatMessage(
-            user_id=user_id,
-            session_id=session_id,
-            role=role,
-            content=content,
-            intent=intent,
-        )
-        db.add(msg)
-        db.commit()
-        db.close()
-    except Exception as e:
-        print(f"⚠️  消息入库失败：{e}")
-
-
-def load_history_from_db(user_id: int, session_id: str = None,
-                         limit: int = 20) -> list:
-    """
-    从数据库加载历史消息，返回格式与 load_memory() 一致
-    [{role: "user", content: "xxx", time: "..."}, ...]
-    """
-    try:
-        from app.models.ai_chat_message import AIChatMessage
-        db = _get_db_session()
-        q = db.query(AIChatMessage).filter(AIChatMessage.user_id == user_id)
-        if session_id:
-            q = q.filter(AIChatMessage.session_id == session_id)
-        messages = q.order_by(AIChatMessage.created_at.asc()).limit(limit).all()
-        result = [{"role": m.role, "content": m.content,
-                    "time": m.created_at.isoformat() if m.created_at else ""}
-                  for m in messages]
-        db.close()
-        return result
-    except Exception as e:
-        print(f"⚠️  历史消息加载失败：{e}")
-        return []
-
-
-def generate_session_id() -> str:
-    """生成唯一会话ID"""
-    return uuid.uuid4().hex[:12]
-
-
-# ---------- 会话级结构化购物记忆 ----------
-# 完整消息存在 ai_chat_messages；这里只保存小而稳定的购物条件，避免 Prompt 无限增长。
-_MEMORY_STOP = {"商品", "产品", "推荐", "购买", "想买", "有没有", "便宜", "更便宜", "价格", "多少钱", "有货", "库存"}
-_PREFERENCES = {"轻薄", "游戏", "学生", "办公", "编程", "拍照", "续航", "大屏", "小屏", "高端", "性价比", "低价", "静音", "便携", "送礼"}
-
-def _memory_words(text: str) -> list[str]:
-    words = re.split(r"[\s,，、/|]+", text or "")
-    result = []
-    for word in words:
-        word = word.strip()[:20]
-        if word and word not in _MEMORY_STOP and word not in result:
-            result.append(word)
-    return result
-
-def _budget(text: str) -> tuple[int | None, int | None]:
-    text = text.replace(",", "")
-    match = re.search(r"(\d{2,6})\s*(?:元)?\s*(?:到|至|[-~～])\s*(\d{2,6})\s*(?:元)?", text)
-    if match:
-        return tuple(sorted((int(match.group(1)), int(match.group(2)))))
-    match = re.search(r"(?:预算|不超过|低于|小于|最多|控制在)\s*(\d{2,6})\s*(?:元)?|(?:\d{2,6})\s*(?:元)?\s*(?:以内|以下)", text)
-    if match:
-        return None, int(match.group(1) or re.search(r"\d{2,6}", match.group(0)).group())
-    match = re.search(r"(?:不少于|至少|起步)\s*(\d{2,6})\s*(?:元)?", text)
-    return (int(match.group(1)), None) if match else (None, None)
-
-def update_structured_memory(
-    memory: dict | None, question: str, intent: str, search_keywords: str, topic_mode: str = "continue"
-) -> dict:
-    """复用已有意图/关键词结果更新记忆，不额外调用模型。"""
-    updated = dict(memory or {})
-    updated["last_intent"] = intent
-    updated["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    if intent != "product": return updated
-    if topic_mode == "new":
-        # 用户明确换商品时，旧商品的预算、偏好不能泄漏到新商品需求中。
-        for key in ("topic_keywords", "preferences", "budget_min", "budget_max"):
-            updated.pop(key, None)
-    old_topics = [x for x in updated.get("topic_keywords", []) if isinstance(x, str)]
-    words = _memory_words(search_keywords)
-    updated["topic_keywords"] = (old_topics + [x for x in words if x not in old_topics])[-8:]
-    old_preferences = [x for x in updated.get("preferences", []) if isinstance(x, str)]
-    found = [x for x in words + _memory_words(question) if x in _PREFERENCES]
-    updated["preferences"] = (old_preferences + [x for x in found if x not in old_preferences])[-8:]
-    low, high = _budget(question)
-    if low is not None: updated["budget_min"] = low
-    if high is not None: updated["budget_max"] = high
-    return updated
-
-def format_structured_memory_for_prompt(memory: dict | None) -> str:
-    if not memory or not memory.get("topic_keywords"): return ""
-    lines = ["【长期购物记忆（仅在与当前问题相关时参考）】", f"关注商品：{'、'.join(memory['topic_keywords'])}"]
-    low, high = memory.get("budget_min"), memory.get("budget_max")
-    if low is not None and high is not None: lines.append(f"预算：{low}-{high} 元")
-    elif high is not None: lines.append(f"预算上限：{high} 元")
-    elif low is not None: lines.append(f"预算下限：{low} 元")
-    if memory.get("preferences"): lines.append(f"偏好：{'、'.join(memory['preferences'])}")
-    return "\n".join(lines)
-
-def load_structured_memory(user_id: int, session_id: str) -> dict:
-    db = _get_db_session()
-    try:
-        from app.models.ai_chat_session import AIChatSession
-        row = db.query(AIChatSession).filter(AIChatSession.user_id == user_id, AIChatSession.session_id == session_id).first()
-        value = json.loads(row.memory_json or "{}") if row else {}
-        return value if isinstance(value, dict) else {}
-    except Exception as error:
-        print(f"⚠️  会话记忆读取失败：{error}"); return {}
-    finally: db.close()
-
-def save_structured_memory(user_id: int, session_id: str, memory: dict) -> None:
-    db = _get_db_session()
-    try:
-        from app.models.ai_chat_session import AIChatSession
-        row = db.query(AIChatSession).filter(AIChatSession.user_id == user_id, AIChatSession.session_id == session_id).first()
-        if not row:
-            row = AIChatSession(user_id=user_id, session_id=session_id); db.add(row)
-        row.memory_json = json.dumps(memory, ensure_ascii=False); db.commit()
-    except Exception as error:
-        db.rollback(); print(f"⚠️  会话记忆保存失败：{error}")
-    finally: db.close()
-
-def merge_memory_into_context(history_text: str, memory: dict) -> str:
-    structured = format_structured_memory_for_prompt(memory)
-    return f"{structured}\n\n【最近对话】\n{history_text or '（无最近对话）'}" if structured else history_text
-
-def remove_structured_memory_from_context(context_text: str) -> str:
-    """新商品话题已确认后，只把原始最近对话交给推荐节点。"""
-    marker = "\n\n【最近对话】\n"
-    prefix, separator, recent_history = context_text.partition(marker)
-    if separator and prefix.startswith("【长期购物记忆（仅在与当前问题相关时参考）】"):
-        return recent_history
-    return context_text
-def format_memory_for_prompt(history, max_turns=6):
-    """
-    把历史对话格式化成 Prompt 能直接用的文本
-    max_turns=6 表示最多取最近 6 条消息 = 3 轮对话（user+ai）
-    防止历史太长把 Prompt 撑爆
-    """
-    if not history:
-        return "（无历史对话）"
-    recent = history[-max_turns:]
-    lines = []
-    for msg in recent:
-        role_name = "用户" if msg["role"] == "user" else "小购"
-        lines.append(f"{role_name}：{msg['content']}")
-    return "\n".join(lines)
-
-
-def _extract_last_user_msg(history_text):
-    """
-    从格式化后的历史文本中提取所有历史用户消息（除最后一条当前问题）
-    历史格式："用户：xxx\n小购：xxx\n用户：yyy\n小购：zzz"
-    返回所有历史用户消息拼接的字符串，如 "xxx yyy"
-    """
-    lines = history_text.strip().split("\n")
-    user_msgs = []
-    for line in lines:
-        if line.startswith("用户："):
-            user_msgs.append(line[3:].strip())
-    # 去掉最后一条（当前问题），其余全部拼上作为上下文
-    if len(user_msgs) >= 2:
-        return " ".join(user_msgs[:-1])
-    return ""
-
-
-# ============================================================
 # 改动 1：导入 LangChain 组件
 # ============================================================
 
@@ -548,7 +349,8 @@ def get_intent_and_expand_prompt_template():
 
 【任务1：意图分类】
 判断用户意图，必须是以下之一：
-- product：用户想搜索/购买/咨询商品
+- product：用户想搜索、推荐或咨询商品，但尚未进入具体下单确认
+- purchase：用户明确要购买某个商品、要确认某个商品能否按指定数量下单，或正在补充待确认订单的收货信息
 - chat：日常闲聊（问候、常识问答、讲笑话等）
 - service：售后问题（订单、物流、退换货等）
 - abuse：恶意内容（辱骂等）
@@ -556,7 +358,7 @@ def get_intent_and_expand_prompt_template():
 【任务2：话题关系判断】（仅当意图为 product 时需要）
 - continue：用户在延续刚才同一种商品或同一组条件，例如“再便宜一点”“要轻薄的”
 - new：用户明确开始另一种商品需求，例如前面聊笔记本，现在问“想买拍照手机”
-- chat、service、abuse 必须填写 none
+- purchase、chat、service、abuse 必须填写 none
 
 【任务3：搜索关键词提取】（仅当意图为 product 时需要）
 从对话上下文和当前问题中，提取用于商品搜索的核心关键词。
@@ -578,6 +380,7 @@ def get_intent_and_expand_prompt_template():
 示例：
 product|continue|笔记本 低价
 product|new|手机 拍照
+purchase|none|
 chat|none|
 service|none|
 abuse|none|
@@ -600,7 +403,8 @@ def get_chat_prompt_template():
 4. **有货优先**：如果有多个推荐，优先推荐库存 > 0 的商品。
 5. **记住上下文**：参考【历史对话】理解用户现在的问题，比如用户说"太贵了"，
    要结合刚才推荐的商品理解，不要让用户重复说一遍。
-6. **简洁明了**：回答 3-5 句话，不要长篇大论。
+6. **卡片一致性**：最多推荐 3 款；只写入你实际推荐的商品，并保留【可推荐商品】中完全一致的商品名和排序。不要提到未推荐商品。
+7. **简洁明了**：回答 3-5 句话，不要长篇大论。
 
 【历史对话】
 {history_text}
@@ -685,6 +489,7 @@ def format_search_results(results_with_dist):
         stock_text = "有货" if meta["stock"] > 0 else "缺货"
         products_text += f"""
 【商品 {i}】
+  商品编号：PR{meta['product_id']}
   名称：{meta['product_name']}
   分类：{meta['category']}
   价格：{meta['price']}元
@@ -709,7 +514,7 @@ def classify_intent_and_expand(question, llm, history_text):
     """
     合并版：一次 LLM 调用同时完成意图分类 + 搜索关键词提取
     返回: (intent, topic_mode, search_keywords)
-      - intent: "product" | "chat" | "service" | "abuse"
+      - intent: "product" | "purchase" | "chat" | "service" | "abuse"
       - topic_mode: product 时为 "continue"（延续）或 "new"（新话题）
       - search_keywords: 搜索关键词字符串（仅 product 意图有值）
     """
@@ -736,7 +541,7 @@ def classify_intent_and_expand(question, llm, history_text):
         keywords = ""
     
     # 确保意图是有效值
-    valid_intents = {"product", "chat", "service", "abuse"}
+    valid_intents = {"product", "purchase", "chat", "service", "abuse"}
     if intent not in valid_intents:
         intent = "chat"
 
@@ -865,7 +670,8 @@ def build_product_chain(vectorstore, llm):
             return {"question": question, "products": [], "products_text": ""}
 
         # 意图重排
-        ranked = _rerank_by_intent(question, filtered, n=5)
+        # 商品文字和卡片最多展示 3 件，避免候选过多造成用户选择困难。
+        ranked = _rerank_by_intent(question, filtered, n=3)
         print(f"  📈 意图重排后：取 {len(ranked)} 条")
 
         # 第二层：关键词校验
@@ -913,7 +719,8 @@ def build_product_chain(vectorstore, llm):
         # Step 2：判断要不要跳过 LLM
         skip_answer = skip_step.invoke(search_result)
         if skip_answer is not None:
-            return skip_answer
+            # 保留结构化结果，供 API 返回给前端绘制商品卡片。
+            return {"answer": skip_answer, "products": []}
         # Step 3：准备 Prompt 输入
         prompt_inputs = prepare_step.invoke(search_result)
         # Step 4：Prompt → LLM → 解析文本
@@ -921,7 +728,8 @@ def build_product_chain(vectorstore, llm):
         llm_result = llm.invoke(prompt_value)
         record_llm_token_usage(llm_result, "product_answer")
         answer = output_parser.invoke(llm_result)
-        return answer
+        # products 是 Chroma 检索并排好序的商品身份证，不能只留下文字回答。
+        return {"answer": answer, "products": search_result["products"]}
 
     return RunnableLambda(_full_chain)
 
@@ -951,18 +759,21 @@ def build_chat_chain(llm):
 # 通道函数（V1：增加 history_text 参数）
 # ============================================================
 def abuse_channel(question):
+    """处理辱骂等不适合继续回答的输入，返回固定且礼貌的拒绝文案。"""
     print("  ⚠️  通道：恶意问题 → 礼貌拒绝")
     answer = "请您文明用语哦~ 我是您的购物助手小购，有任何购物相关的问题，我都会尽力帮您解决的~"
     print(f"  🤖 AI：{answer}")
     return answer
 
 def service_channel(question):
+    """处理订单、物流、退换货等售后问题；当前为等待后续接入的占位回复。"""
     print("  📞 通道：订单/售后（预留接口）")
     answer = "订单/售后功能正在完善中~ 您可以在网站的「个人中心-我的订单」里查看订单状态和物流信息哦~"
     print(f"  🤖 AI：{answer}")
     return answer
 
 def chat_channel(chat_chain, question, history_text=""):
+    """执行闲聊链：将最近对话和当前问题交给 DeepSeek 生成简短客服回复。"""
     print("  💬 通道：闲聊/常识（LangChain Chat Chain）")
     print(f"  🧠 交给 DeepSeek 大模型闲聊回答...（含历史记忆）")
     answer = chat_chain.invoke({
@@ -972,20 +783,84 @@ def chat_channel(chat_chain, question, history_text=""):
     print(f"  🤖 AI：{answer}")
     return answer
 
+def _load_current_recommended_products(results_with_dist) -> list[dict]:
+    """按 RAG 排序，从 MySQL 读取当前仍上架且有库存的商品卡片数据。"""
+    product_ids = []
+    for metadata, _distance in results_with_dist:
+        try:
+            product_id = int(metadata["product_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if product_id not in product_ids:
+            product_ids.append(product_id)
+
+    if not product_ids:
+        return []
+
+    from app.models.product import Product
+
+    db = _get_db_session()
+    try:
+        rows = db.query(Product).filter(
+            Product.id.in_(product_ids), Product.status == 1, Product.stock > 0
+        ).all()
+        products_by_id = {row.id: row for row in rows}
+        return [
+            {
+                "id": row.id,
+                "product_code": row.product_code,
+                "name": row.name,
+                "price": float(row.price),
+                "stock": row.stock,
+                "image_url": row.image_url or "",
+            }
+            for product_id in product_ids
+            if (row := products_by_id.get(product_id)) is not None
+        ]
+    finally:
+        db.close()
+
+
+def align_recommended_products_to_answer(answer: str, candidates: list[dict]) -> list[dict]:
+    """只保留回答中实际提到的商品，并按商品名在回答中出现的顺序排列卡片。"""
+    if not isinstance(answer, str):
+        return []
+
+    mentioned = []
+    for original_index, product in enumerate(candidates):
+        name = product.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        position = answer.find(name)
+        if position >= 0:
+            mentioned.append((position, original_index, product))
+
+    # position 让卡片跟随文字顺序；original_index 是同位置时保持 RAG 排名的稳定兜底。
+    mentioned.sort(key=lambda item: (item[0], item[1]))
+    return [product for _position, _index, product in mentioned[:3]]
+
+
 def product_channel(product_chain, question, history_text="", search_keywords=""):
+    """执行商品 RAG 链，并将向量检索结果重新从 MySQL 读取为可展示的商品卡片。"""
     print("  📦 通道：商品咨询（LangChain RAG Chain）")
     if search_keywords:
         print(f"  🔧 复用意图分类阶段的关键词：{search_keywords}")
     print(f"  🧠 交给 RAG Chain 处理...（含历史记忆）")
-    answer = product_chain.invoke({
+    chain_result = product_chain.invoke({
         "question": question,
         "history_text": history_text,
         "search_keywords": search_keywords,
     })
+    answer = chain_result["answer"]
     if hasattr(answer, "strip"):
         answer = answer.strip()
     print(f"  🤖 AI：{answer}")
-    return answer
+    cards = _load_current_recommended_products(chain_result.get("products", []))
+    return {
+        "answer": answer,
+        # 卡片不能比回答文字多，也不能按另一套 RAG 顺序展示。
+        "recommended_products": align_recommended_products_to_answer(answer, cards),
+    }
 
 
 # ============================================================
@@ -1018,7 +893,7 @@ def ai_customer_service(vectorstore, llm, chat_chain, product_chain, question, h
     elif intent == "service":
         answer = service_channel(question)
     elif intent == "product":
-        answer = product_channel(product_chain, question, history_text)
+        answer = product_channel(product_chain, question, history_text)["answer"]
     else:
         answer = "抱歉，我没理解您的意思，可以再说一遍吗？"
 
@@ -1051,10 +926,17 @@ class AgentState(TypedDict):
     topic_mode:str    # product 时是 continue（延续）或 new（新话题）
     search_keyword:str # 搜索关键词
     answer:str        # 回答文本
+    recommended_products:list[dict]  # 前端商品卡片使用的实时商品数据
+    # add_messages 规定：节点返回的新消息要追加到已有消息，而不是把旧消息覆盖掉。
+    messages: Annotated[list, add_messages]
+    # 仅由后端写入，ToolNode 会注入给需要保存会话草稿的工具；模型不能自行指定它们。
+    user_id: int | None
+    session_id: str | None
 
 
 # ---------- 节点 1：意图分类 ----------
 def classify_intent_node(state:AgentState)->dict:
+    """LangGraph 首节点：一次模型调用同时得到意图、话题关系和商品检索关键词。"""
     intent, topic_mode, search_keywords = classify_intent_and_expand(
         state["question"], _llm, state["history_text"]
     )
@@ -1067,24 +949,61 @@ def classify_intent_node(state:AgentState)->dict:
 
 # ---------- 节点 2：商品推荐（RAG）----------
 def product_node(state:AgentState)->dict:
-    answer = product_channel(
+    """LangGraph 商品节点：运行 RAG 推荐并返回自然语言答案和商品卡片。"""
+    result = product_channel(
         _product_chain,
         state["question"],
         state["history_text"],
         state["search_keyword"],
     )
-    print(f"商品推荐结果：{answer}")
-    return {"answer": answer}
+    print(f"商品推荐结果：{result['answer']}")
+    return result
 
 
-# ---------- 节点 3：闲聊 ----------
+# ---------- 节点 3：购买前的 ReAct 决策 ----------
+ORDER_AGENT_SYSTEM_PROMPT = """你是电商下单助手。你可以使用工具查询实时商品状态。
+
+规则：
+1. 你必须结合用户本轮消息和最近对话，自主判断该调用哪个工具；不要让 Python 规则替你判断购买意图。
+2. 商品编号的公开格式为 PR 加数字，例如 PR500 对应内部 product_id=500。调用工具时，product_id 填编号中的数字部分 500。
+3. 当你理解用户明确要“买/购买/下单”，且已能确定商品编号和数量时，直接调用 start_order_draft。该工具会重新校验实时库存；绝不能先查库存后再问“是否确定购买”。数量未说时按 1 件处理。
+4. 用户只问“库存/价格/能不能买”，且没有明确要下单时，调用 check_product_for_order；数量未说时按 1 件查询。
+5. start_order_draft 成功后，直接告知已选商品和数量，并询问缺少的收货信息；不要重复确认用户是否要买。
+6. 用户在已有待确认订单时提供姓名、电话、地址或备注，调用 fill_order_draft_receiver；只传入用户本轮明确说出的字段。
+7. 工具提示资料齐全后，向用户展示商品、数量和草稿金额，并请用户明确回复“确认提交”；不要自动创建订单。
+8. 只有当前草稿资料齐全、且用户本轮明确说“确认提交”或同等确认语时，才调用 confirm_order_draft。工具成功后告知订单号和“待支付”，不要说已支付。
+9. 绝不因为“我想买”“可以下单吗”或“资料填好了”调用 confirm_order_draft。
+10. 如果没有商品编号，礼貌请用户打开商品详情页，查看“商品编号（例如 PR500）”后告诉你；不要调用工具。
+"""
+
+
+def purchase_node(state: AgentState) -> dict:
+    """ReAct 的思考节点：每一轮都由模型决定回答或请求调用哪个白名单工具。"""
+    order_llm = _llm.bind_tools(ORDER_AGENT_TOOLS)
+    system_message = SystemMessage(
+        content=f"{ORDER_AGENT_SYSTEM_PROMPT}\n【最近对话】\n{state['history_text'] or '（无）'}"
+    )
+    response = order_llm.invoke([system_message, *state["messages"]])
+    record_llm_token_usage(response, "purchase_agent")
+    answer = response.content.strip() if isinstance(response.content, str) else ""
+    return {"messages": [response], "answer": answer}
+
+
+def route_purchase_after_model(state: AgentState) -> str:
+    """模型给出 tool_calls 就去执行工具；否则它已直接回答，本轮结束。"""
+    latest_message = state["messages"][-1]
+    return "tools" if getattr(latest_message, "tool_calls", []) else "end"
+
+
+# ---------- 节点 4：闲聊 ----------
 def chat_node(state: AgentState) -> dict:
+    """LangGraph 闲聊节点：不检索商品，直接调用闲聊 Chain。"""
     answer = chat_channel(_chat_chain, state["question"], state["history_text"])
     print(f"闲聊结果：{answer}")
     return {"answer": answer}
 
 
-# ---------- 节点 4：售后 ----------
+# ---------- 节点 5：售后 ----------
 def service_node(state: AgentState) -> dict:
     """
     对应手写版：service_channel(question)
@@ -1095,7 +1014,7 @@ def service_node(state: AgentState) -> dict:
     return {"answer": answer}
 
 
-# ---------- 节点 5：恶意拒绝 ----------
+# ---------- 节点 6：恶意拒绝 ----------
 def abuse_node(state: AgentState) -> dict:
     """
     对应手写版：abuse_channel(question)
@@ -1105,10 +1024,11 @@ def abuse_node(state: AgentState) -> dict:
     print (f"恶意拒绝结果：{answer}")
     return {"answer": answer}
 
-# ---------- 节点 6：路由 ----------
+# ---------- 节点 7：路由 ----------
 def route_by_intent(state: AgentState) -> str:
+    """读取分类节点的 intent 字段，返回 LangGraph 中下一站节点的名字。"""
     intent = state.get("intent", "product")
-    return intent  # 返回 product / chat / service / abuse
+    return intent  # 返回 product / purchase / chat / service / abuse
 
 
 # ---------- 构建 StateGraph ----------
@@ -1126,6 +1046,8 @@ def build_graph():
     # 2. 添加节点（给每个节点起个名字，和图里的方块对应）
     workflow.add_node("classify_intent_node", classify_intent_node)
     workflow.add_node("product_node", product_node)
+    workflow.add_node("purchase_node", purchase_node)
+    workflow.add_node("purchase_tools", ToolNode(ORDER_AGENT_TOOLS))
     workflow.add_node("chat_node", chat_node)
     workflow.add_node("service_node", service_node)
     workflow.add_node("abuse_node", abuse_node)
@@ -1138,6 +1060,7 @@ def build_graph():
         route_by_intent,          # 路由函数：返回下一个节点名
         {
             "product": "product_node",
+            "purchase": "purchase_node",
             "chat": "chat_node",
             "service": "service_node",
             "abuse": "abuse_node",
@@ -1145,6 +1068,14 @@ def build_graph():
     )
     # 5. 所有通道节点执行完后，结束
     workflow.add_edge("product_node", END)
+    # purchase_node 先由模型决定是否要调用工具；工具执行完必须回到模型，
+    # 让模型读取“观察结果”后再生成面向用户的回复。
+    workflow.add_conditional_edges(
+        "purchase_node",
+        route_purchase_after_model,
+        {"tools": "purchase_tools", "end": END},
+    )
+    workflow.add_edge("purchase_tools", "purchase_node")
     workflow.add_edge("chat_node", END)
     workflow.add_edge("service_node", END)
     workflow.add_edge("abuse_node", END)
@@ -1178,6 +1109,21 @@ def init_langgraph():
 
 
 
+def get_created_order_from_current_turn(messages: list) -> dict | None:
+    """从本次 LangGraph 运行的工具回执中取订单摘要，不读取持久化会话记忆。"""
+    for message in reversed(messages):
+        if getattr(message, "name", None) != "confirm_order_draft":
+            continue
+        try:
+            payload = json.loads(getattr(message, "content", ""))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if payload.get("ok") and payload.get("code") == "ORDER_CREATED":
+            order = payload.get("order")
+            return order if isinstance(order, dict) else None
+    return None
+
+
 def run_agent(question: str, history_text: str = "", user_id: int = None, session_id: str = None) -> dict:
     """执行 Agent；每次仅把最近消息和会话级购物条件送入 Prompt。"""
     init_langgraph()
@@ -1186,22 +1132,33 @@ def run_agent(question: str, history_text: str = "", user_id: int = None, sessio
     initial_state: AgentState = {
         "question": question, "history_text": merge_memory_into_context(history_text, memory),
         "intent": "", "topic_mode": "", "search_keyword": "", "answer": "",
+        "recommended_products": [],
+        "messages": [HumanMessage(content=question)],
+        "user_id": user_id,
+        "session_id": sid,
     }
     result = _graph.invoke(initial_state)
     if user_id and sid:
+        # ToolNode 可能刚保存了 pending_order；重新读取可避免用旧 memory 把它覆盖掉。
+        latest_memory = load_structured_memory(user_id, sid)
         updated = update_structured_memory(
-            memory, question, result.get("intent", ""), result.get("search_keyword", ""),
+            latest_memory, question, result.get("intent", ""), result.get("search_keyword", ""),
             result.get("topic_mode", "continue"),
         )
         save_structured_memory(user_id, sid, updated)
         save_message_to_db(user_id, sid, "user", question, intent=result.get("intent", ""))
         save_message_to_db(user_id, sid, "ai", result["answer"], intent=result.get("intent", ""))
         result["session_id"] = sid
+        # 不让模型复述电话、地址；由后端直接从当前会话记忆组装给前端。
+        result["order_draft"] = build_order_draft_confirmation(updated)
+        # 订单跳转卡片只属于“本轮刚执行确认工具”的通知，绝不从长期 memory_json 重复生成。
+        result["created_order"] = get_created_order_from_current_turn(result.get("messages", []))
     return result
 # ============================================================
 # 第五部分：演示 + 聊天模式（方便本地测试）
 # ============================================================
 def run_demos(vectorstore, llm, chat_chain, product_chain, history):
+    """命令行教学演示：按预设问题依次测试闲聊、RAG、售后和恶意输入。"""
     demos = [
         ("1+1等于几？", "闲聊测试（第1轮）"),
         ("对啦，我刚才问的是什么来着？", "记忆测试（第2轮，看能否想起第1轮）"),
@@ -1224,6 +1181,7 @@ def run_demos(vectorstore, llm, chat_chain, product_chain, history):
 
 
 def run_chat_mode(vectorstore, llm, chat_chain, product_chain, history):
+    """命令行交互模式：供本地手动输入问题，不参与 FastAPI 网站请求。"""
     print("\n" + "=" * 60)
     print("  💬 进入聊天模式（带上下文记忆 V1）")
     print("  使用说明：输入问题对话")
@@ -1256,6 +1214,7 @@ def run_chat_mode(vectorstore, llm, chat_chain, product_chain, history):
 
 
 def main():
+    """直接运行 ai_core.py 时的教学入口：初始化组件、运行演示，再进入命令行聊天。"""
     print("\n" + "=" * 60)
     print("  🛒 合并版 AI 客服系统 + 记忆 V1 + LangGraph Agent")
     print("=" * 60)

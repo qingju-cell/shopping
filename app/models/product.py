@@ -3,7 +3,8 @@
 # 功能：映射数据库中的 products 表，存储商品信息
 # 对应数据库表：products
 # 字段说明：
-#   - id: 商品ID（主键，自增）
+#   - id: 商品ID（主键，自增，只供系统内部关联）
+#   - product_code: 对用户展示的商品编号，由 id 动态生成，例如 id=500 → PR500
 #   - name: 商品名称
 #   - description: 商品描述（详细介绍）
 #   - price: 商品价格（DECIMAL 精确到 2 位小数）
@@ -26,6 +27,11 @@ class Product(Base):
 
     # ---------- 主键 ----------
     id = Column(Integer, primary_key=True, autoincrement=True, comment="商品ID")
+
+    @property
+    def product_code(self) -> str:
+        """返回公开商品编号；不入库，避免改变订单/库存等表使用的内部主键。"""
+        return f"PR{self.id}" if self.id is not None else ""
 
     # ---------- 商品基本信息 ----------
     name = Column(String(200), nullable=False, comment="商品名称")
@@ -50,6 +56,7 @@ class Product(Base):
 
         return{
             "id":self.id,
+            "product_code": self.product_code,
             "name":self.name,
             "description":self.description,
             "price":float(self.price),

@@ -6,8 +6,8 @@
 #   3. 定义分页查询的响应结构
 # ============================================================
 
-from pydantic import BaseModel, Field
-from typing import Optional
+from pydantic import BaseModel, Field, model_validator
+from typing import Any, Optional
 from datetime import datetime
 from decimal import Decimal
 
@@ -40,6 +40,8 @@ class ProductUpdate(BaseModel):
 # ---------- 商品信息响应 ----------
 class ProductResponse(BaseModel):
     id: int
+    # 对外编号不是数据库列，而是由内部 id 推导出的稳定展示值，例如 500 → PR500。
+    product_code: str
     name: str
     description: Optional[str]
     price: Decimal
@@ -50,6 +52,14 @@ class ProductResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def add_product_code_for_cached_dict(cls, value: Any) -> Any:
+        """兼容 Redis 中尚未带 product_code 的旧商品缓存。"""
+        if isinstance(value, dict) and not value.get("product_code") and value.get("id") is not None:
+            return {**value, "product_code": f"PR{value['id']}"}
+        return value
 
 
 # ---------- 分页查询结果 ----------

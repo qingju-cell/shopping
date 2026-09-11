@@ -44,6 +44,8 @@ export interface CategoryUpdate {
 // 商品相关类型
 export interface Product {
   id: number
+  /** 用户和 AI 使用的公开商品编号，例如 PR500；数据库关联仍使用 id=500。 */
+  product_code: string
   name: string
   description?: string | null
   price: number
